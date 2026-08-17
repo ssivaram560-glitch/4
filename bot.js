@@ -26,18 +26,18 @@ const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Mart
 const LEVEL_REQUIREMENTS = [1, 2, 2, 4, 3, 4, 2, 4, 2, 2, 2, 2, 2, 2, 1];
 const LEVEL_RULES = {
     1: { type: 'none' },
-    2: { type: 'watch', lossesRequired: 3 },
-    3: { type: 'watch', lossesRequired: 4 },
-    4: { type: 'watch', lossesRequired: 5 },
-    5: { type: 'watch', lossesRequired: 5 },
-    6: { type: 'watch', lossesRequired: 4 },
-    7: { type: 'watch', lossesRequired: 4 },
-    8: { type: 'skip', skipPeriods: 7 },
-    9: { type: 'watch', lossesRequired: 4 },
-    10: { type: 'watch', lossesRequired: 4 },
-    11: { type: 'watch', lossesRequired: 2 },
-    12: { type: 'watch', lossesRequired: 2 },
-    13: { type: 'watch', lossesRequired: 2 },
+    2: { type: 'none' },
+    3: { type: 'none' },
+    4: { type: 'none' },
+    5: { type: 'none' },
+    6: { type: 'none' },
+    7: { type: 'none' },
+    8: { type: 'none' },
+    9: { type: 'none' },
+    10: { type: 'none' },
+    11: { type: 'none' },
+    12: { type: 'none' },
+    13: { type: 'none' },
     14: { type: 'none' },
     15: { type: 'none' }
 };
@@ -277,8 +277,8 @@ async function getLiveBalance(userId, chatId = null) {
 }
 
 function initUser(id) {
-    if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0 };
-   if (!userStates[id])   userStates[id]   = { resultHistory:[], skipCount:0, currentMode:null, lastPrediction:null };
+    if (!stats[id])        stats[id]        = { total:0,win:0,loss:0,skip:0,lossStreak:0,winStreak:0,maxWinStreak:0,maxLossStreak:0 };
+   if (!userStates[id])   userStates[id]   = { resultHistory:[], currentMode:null };
     if (!sentPeriods[id])  sentPeriods[id]  = new Set();
     if (!autobetCfg[id])   autobetCfg[id]   = { 
         watch:false, 
@@ -297,7 +297,6 @@ function initUser(id) {
         waitingAction: null,
         waitingTarget: 0,
         watchConsecutiveLosses: 0,
-        skipRemaining: 0,
         inMart:false,
         isWaiting: false,      // NEW: Bot waiting-la irukka-nu check panna
         nextStartTime: null    // NEW: Thirumba eppo start aakanum-nu store panna
@@ -757,7 +756,6 @@ function initState(userId) {
             lastPredictionWasLoss: false,
             consecutivePatternLoss: 0,
             predictionOutcomes: [],
-            skipRemaining: 0,
             c4Active: false,
             c5Triggered: false,
             lastDecisionSource: null
@@ -771,7 +769,6 @@ function initState(userId) {
         if (userStates[userId].lastPredictionWasLoss === undefined) userStates[userId].lastPredictionWasLoss = false;
         if (userStates[userId].consecutivePatternLoss === undefined) userStates[userId].consecutivePatternLoss = 0;
         if (userStates[userId].predictionOutcomes === undefined) userStates[userId].predictionOutcomes = [];
-        if (userStates[userId].skipRemaining === undefined) userStates[userId].skipRemaining = 0;
         if (userStates[userId].c4Active === undefined) userStates[userId].c4Active = false;
         if (userStates[userId].c5Triggered === undefined) userStates[userId].c5Triggered = false;
         if (userStates[userId].lastDecisionSource === undefined) userStates[userId].lastDecisionSource = null;
@@ -784,175 +781,62 @@ function getLevelRequirement(level) {
 }
 
 // ============================================================
-//  BUMBEE RULES-BASED PREDICTION LOGIC
+//  PREDICTION LOGIC REMOVED
 // ============================================================
-const BUMBEE_RULES = {
-    0: {
-        0:"SKIP", 1:"SKIP", 2:"SMALL", 3:"SMALL", 4:"SMALL",
-        5:"SMALL", 6:"BIGBIG", 7:"BIGBIG", 8:"BIGBIG", 9:"BIGBIG"
-    },
-    1: {
-        0:"SKIP", 1:"SKIP", 2:"SKIP", 3:"SMALL", 4:"SMALL",
-        5:"SMALL", 6:"SMALL", 7:"BIGBIG", 8:"BIGBIG", 9:"BIGBIG"
-    },
-    2: {
-        0:"BIGBIG", 1:"SKIP", 2:"SKIP", 3:"SKIP", 4:"SMALL",
-        5:"SMALL", 6:"SMALL", 7:"SMALL", 8:"BIGBIG", 9:"BIGBIG"
-    },
-    3: {
-        0:"BIGBIG", 1:"BIGBIG", 2:"SKIP", 3:"SKIP", 4:"SKIP",
-        5:"SMALL", 6:"SMALL", 7:"SMALL", 8:"SMALL", 9:"BIGBIG"
-    },
-    4: {
-        0:"BIGBIG", 1:"BIGBIG", 2:"BIGBIG", 3:"SKIP", 4:"SKIP",
-        5:"SKIP", 6:"SMALL", 7:"SMALL", 8:"SMALL", 9:"SMALL"
-    },
-    5: {
-        0:"BIGBIG", 1:"BIGBIG", 2:"BIGBIG", 3:"BIGBIG", 4:"SKIP",
-        5:"SKIP", 6:"SKIP", 7:"SMALL", 8:"SMALL", 9:"SMALL"
-    },
-    6: {
-        0:"SMALL", 1:"BIGBIG", 2:"BIGBIG", 3:"BIGBIG", 4:"BIGBIG",
-        5:"SKIP", 6:"SKIP", 7:"SKIP", 8:"SMALL", 9:"SMALL"
-    },
-    7: {
-        0:"SMALL", 1:"SMALL", 2:"BIGBIG", 3:"BIGBIG", 4:"BIGBIG",
-        5:"BIGBIG", 6:"SKIP", 7:"SKIP", 8:"SKIP", 9:"SMALL"
-    },
-    8: {
-        0:"SMALL", 1:"SMALL", 2:"SMALL", 3:"BIGBIG", 4:"BIGBIG",
-        5:"BIGBIG", 6:"BIGBIG", 7:"SKIP", 8:"SKIP", 9:"SKIP"
-    },
-    9: {
-        0:"SMALL", 1:"SMALL", 2:"SMALL", 3:"SMALL", 4:"BIGBIG",
-        5:"BIGBIG", 6:"BIGBIG", 7:"BIGBIG", 8:"SKIP", 9:"SKIP"
-    }
-};
-
-function getBumbeePrediction(lastNumber, previousNumber) {
-    try {
-        const last = parseInt(lastNumber);
-        const prev = parseInt(previousNumber);
-        
-        if (isNaN(last) || isNaN(prev) || last < 0 || last > 9 || prev < 0 || prev > 9) {
-            return "SKIP";
-        }
-        
-        const prediction = BUMBEE_RULES[last][prev];
-        return prediction || "SKIP";
-    } catch (e) {
-        console.error("[BUMBEE PREDICTION ERROR]", e.message);
-        return "SKIP";
-    }
-}
-
-function isBumbeeWin(prediction, actual) {
-    try {
-        const num = parseInt(actual);
-        
-        if (isNaN(num) || num < 0 || num > 9) {
-            return false;
-        }
-        
-        if (prediction === "SMALL") {
-            return num >= 0 && num <= 4;
-        }
-        
-        if (prediction === "BIGBIG") {
-            return num >= 5 && num <= 9;
-        }
-        
-        return false;
-    } catch (e) {
-        console.error("[BUMBEE WIN CHECK ERROR]", e.message);
-        return false;
-    }
-}
-
-function getNormalPrediction(sizes) {
-    if (!sizes || !sizes.length) return "SMALL";
-    const bigCount = sizes.filter(size => size === "BIG").length;
-    return bigCount >= 3 ? "BIG" : "SMALL";
-}
-
-function getOppositePrediction(value) {
-    return value === "BIG" ? "SMALL" : "BIG";
-}
 
 function decidePrediction(list, currentLevel, userId) {
-    if (!list || list.length < 2) {
+    if (!list || list.length < 10) {
         return null;
     }
-
-    initState(userId);
-    const state = userStates[userId];
-
-    // Get last and previous numbers
-    const lastItem = list[0];
-    const previousItem = list[1];
     
-    const lastNumber = lastItem.number || lastItem.winNumber || 0;
-    const previousNumber = previousItem.number || previousItem.winNumber || 0;
+    // =========== LOGIC 1: R10 OPPOSITE ===========
+    const r10Item = list[9];
+    const r10Number = parseInt(r10Item.number || r10Item.winNumber || 0);
+    const r10Size = (r10Number >= 0 && r10Number <= 4) ? "SMALL" : "BIG";
+    const logic1Prediction = r10Size === "SMALL" ? "BIG" : "SMALL";
     
-    // Use BUMBEE_RULES prediction
-    const bumbeePrediction = getBumbeePrediction(lastNumber, previousNumber);
+    // =========== LOGIC 2: LATEST + LEVEL PATTERN ===========
+    const latestItem = list[0];
+    const latestNumber = parseInt(latestItem.number || latestItem.winNumber || 0);
+    const latestSize = (latestNumber >= 0 && latestNumber <= 4) ? "SMALL" : "BIG";
     
-    // Handle SKIP
-    if (bumbeePrediction === "SKIP") {
-        state.lastDecisionSource = "BUMBEE_SKIP";
+    // Level pattern: SSSSOSOSS (1-indexed)
+    // L1=S, L2=S, L3=S, L4=S, L5=O, L6=S, L7=O, L8=S, L9=S
+    const levelPattern = {
+        1: 'S', 2: 'S', 3: 'S', 4: 'S', 5: 'O',
+        6: 'S', 7: 'O', 8: 'S', 9: 'S'
+    };
+    
+    const safeLevel = Math.max(1, Math.min(9, currentLevel || 1));
+    const pattern = levelPattern[safeLevel] || 'S';
+    
+    const logic2Prediction = (pattern === 'S') ? latestSize : (latestSize === "SMALL" ? "BIG" : "SMALL");
+    
+    // =========== COMPARE: Both must agree ===========
+    if (logic1Prediction === logic2Prediction) {
         return {
             type: "SIZE",
-            val: null,
-            skip: true,
-            conf: 0,
-            pat: "BUMBEE_SKIP",
-            reason: "BUMBEE_RULES"
+            val: logic1Prediction,
+            conf: 95,
+            pat: `L${safeLevel}_BOTH`,
+            reason: `L1(R10${r10Size}→${logic1Prediction}) & L2(Latest${latestSize}${pattern}→${logic2Prediction}) agree`
         };
+    } else {
+        // Logics disagree - skip
+        return null;
     }
-    
-    // Convert BUMBEE format to bot format (SMALL -> SMALL, BIGBIG -> BIG)
-    const prediction = bumbeePrediction === "SMALL" ? "SMALL" : "BIG";
-    
-    state.lastDecisionSource = "BUMBEE";
-    return {
-        type: "SIZE",
-        val: prediction,
-        conf: 90,
-        pat: "BUMBEE_RULES",
-        reason: `LAST:${lastNumber} PREV:${previousNumber}`
-    };
 }
 
 function updateAfterResult(userId, wasWin, actual, betPlaced, betLevel) {
     initState(userId);
     const state = userStates[userId];
     
-    const isSkip = actual === null;
-    state.lastPredictionWasLoss = isSkip ? false : !wasWin;
     state.periodCounter++;
 
     const outcome = wasWin ? "WIN" : "LOSS";
-    state.predictionOutcomes.push(isSkip ? "SKIP" : outcome);
+    state.predictionOutcomes.push(outcome);
     if (state.predictionOutcomes.length > 5) {
         state.predictionOutcomes.shift();
-    }
-
-    if (state.lastDecisionSource === "C4") {
-        if (wasWin) {
-            state.c4Active = true;
-        } else {
-            state.c4Active = false;
-            state.skipRemaining = 2;
-        }
-    } else if (state.lastDecisionSource === "C5") {
-        state.c5Triggered = false;
-        state.c4Active = false;
-    } else if (state.lastDecisionSource === "SKIP") {
-        state.c4Active = false;
-    }
-
-    if (isSkip) {
-        return;
     }
 
     const currentActiveMode = (state.historyModes.length > 0) ? state.historyModes[state.historyModes.length - 1] : (state.mode === "NORMAL" ? "N" : "R");
@@ -990,7 +874,6 @@ function updateAfterResult(userId, wasWin, actual, betPlaced, betLevel) {
             st.waitingAction = null;
             st.waitingTarget = 0;
             st.watchConsecutiveLosses = 0;
-            st.skipRemaining = 0;
             return false;
         }
 
@@ -1004,17 +887,10 @@ function updateAfterResult(userId, wasWin, actual, betPlaced, betLevel) {
                 st.waitingAction = 'watch';
                 st.waitingTarget = currentRule.lossesRequired;
                 st.watchConsecutiveLosses = 0;
-                st.skipRemaining = 0;
-            } else if (currentRule.type === 'skip') {
-                st.waitingAction = 'skip';
-                st.waitingTarget = currentRule.skipPeriods;
-                st.skipRemaining = currentRule.skipPeriods;
-                st.watchConsecutiveLosses = 0;
             } else {
                 st.waitingAction = null;
                 st.waitingTarget = 0;
                 st.watchConsecutiveLosses = 0;
-                st.skipRemaining = 0;
             }
 
             if (cfg && cfg.watch) {
@@ -1038,12 +914,7 @@ function updateAfterResult(userId, wasWin, actual, betPlaced, betLevel) {
                 st.waitingTarget = 0;
                 st.watchConsecutiveLosses = 0;
             }
-        } else if (st.waitingAction === 'skip') {
-            st.skipRemaining = Math.max(0, st.skipRemaining - 1);
-            if (st.skipRemaining === 0) {
-                st.waitingAction = null;
-                st.waitingTarget = 0;
-            }
+
         } else if (cfg && cfg.watch) {
             if (wasWin) {
                 st.consecutiveLoss = 0;
@@ -1184,14 +1055,15 @@ async function runPredict(userId, chatId) {
     sentPeriods[userId].add(next);
 
     const signal = decidePrediction(list, st.level, userId);
-    if(!signal) return setTimeout(()=>runPredict(userId,chatId), 5000);
-
-    const waitingDueToLevel = st.waitingAction === 'watch' || st.waitingAction === 'skip';
-    if (signal.skip && !waitingDueToLevel) {
-        updateAfterResult(userId, false, null, false, st.level);
-        await send(chatId, `⏭️ Skip Round (${signal.reason}) — no bet placed.`);
-        return setTimeout(()=>runPredict(userId,chatId), 7000);
+    if(!signal) {
+        // Logics disagreed - send skip message and track statistic
+        stats[userId].skip++;
+        stats[userId].total++;
+        await send(chatId, `⏭️ SKIP Period ${next.slice(-6)}\n(Logic disagreement - no bet placed)`);
+        return setTimeout(()=>runPredict(userId,chatId), 5000);
     }
+
+    const waitingDueToLevel = st.waitingAction === 'watch';
 
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
@@ -1205,9 +1077,7 @@ async function runPredict(userId, chatId) {
         if (st.waitingAction === 'watch') {
             waitLine = `\nWatch: ${st.watchConsecutiveLosses}/${st.waitingTarget} losses`;
             abLine = `👀 WATCH MODE (${st.level})`;
-        } else if (st.waitingAction === 'skip') {
-            waitLine = `\nSkip: ${st.skipRemaining} periods`;
-            abLine = `⏸ SKIP MODE (${st.level})`;
+
         }
     } else if (cfg.watch && st.consecutiveLoss < cfg.watchLoss) {
         abLine = `👀 WATCHING: ${st.consecutiveLoss}/${cfg.watchLoss}`;
@@ -1341,7 +1211,7 @@ module.exports = { decidePrediction, updateAfterResult, getStatus, initState, bu
 function showStats(chatId,userId){
     const d=stats[userId],rate=d.total?((d.win/d.total)*100).toFixed(1):"0.0";
     const bar="🟦".repeat(d.total?Math.round(d.win/d.total*10):0)+"⬜".repeat(d.total?10-Math.round(d.win/d.total*10):10);
-    send(chatId,"📊 STATS\n\nTotal: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nAcc: "+rate+"%\n"+bar+"\n\nBest Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak");
+    send(chatId,"📊 STATS\n\nTotal: "+d.total+"\nWins: "+d.win+"\nLosses: "+d.loss+"\nSkips: "+(d.skip||0)+"\nAcc: "+rate+"%\n"+bar+"\n\nBest Win: "+d.maxWinStreak+" streak\nWorst Loss: "+d.maxLossStreak+" streak");
 }
 async function profitReport(chatId,userId){
     initUser(userId);
@@ -1382,6 +1252,8 @@ async function autobetStatus(chatId, userId) {
         }
     } else if (creds.phone) {
         liveBal = "❌ Login Required";
+    } else if (creds.balance) {
+        liveBal = "₹" + creds.balance.toFixed(2) + " (Manual)";
     }
 
     let waitLine = "";
@@ -1415,7 +1287,7 @@ waitLine+"\n"+
 //  KEYBOARDS
 // ============================================================
 function userMenu(id){
-    const rows=[["▶️ Start Prediction","🛑 Stop"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
+    const rows=[["▶️ Start Prediction","🛑 Stop"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"],["💳 Set Balance"]];
     if(isAdmin(id))rows.push(["👑 Admin Panel"]);
     return{keyboard:rows,resize_keyboard:true};
 }
@@ -1641,6 +1513,14 @@ function addHandlers(){
                 delete userAction[id];
                 return send(id, "✅ Custom Bets Updated!\nLevels: " + vals.length + "\nSequence: ₹" + vals.join(" → ₹"), {reply_markup: autobetMenu});
             }
+            else if(s.action === "setbalance"){
+                const v = parseFloat(text);
+                if(isNaN(v) || v < 0) return send(id, "❌ Invalid Amount!");
+                if(!userCreds[id]) userCreds[id] = {};
+                userCreds[id].balance = v;
+                delete userAction[id];
+                return send(id, "✅ Balance Set: ₹" + v.toFixed(2), {reply_markup: userMenu(id)});
+            }
         }
 
         if(isAdmin(id)&&isAdminIn(id)){
@@ -1759,7 +1639,6 @@ if(text==="🔢 Set Watch Losses"){
                 waitingAction:null,
                 waitingTarget:0,
                 watchConsecutiveLosses:0,
-                skipRemaining:0,
                 inMart:false
             };
 
@@ -1784,7 +1663,8 @@ if(text==="🔢 Set Watch Losses"){
         if(text==="🛑 Stop")   {running[id]=false;send(msg.chat.id,"🛑 Stopped.");}
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
-        if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
+        if(text==="� Set Balance") {userAction[id]={action:"setbalance"};return send(id,"Enter your current balance amount (₹):");}
+        if(text==="�📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
     });
 }
 startBot();
