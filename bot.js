@@ -939,6 +939,7 @@ function getStatus(userId) {
 async function handleWin(userId, chatId, actual, num, betLevel) {
     const pt = profitTrack[userId];
     const cfg = autobetCfg[userId];
+    const st = autobetState[userId];
     const amt = getBetAmount(userId, betLevel);
     const profit = amt * 0.98;
     
@@ -951,13 +952,13 @@ async function handleWin(userId, chatId, actual, num, betLevel) {
 "╔══════════════════════════╗\n"+
 "║  ✅ WIN! 🎉              ║\n"+
 "╠══════════════════════════╣\n"+
+"║ Level  : L"+betLevel+" → L1\n"+
 "║ Number : "+num+"\n"+
 "║ Result : "+actual+"\n"+
 "║ Profit : +₹"+profit.toFixed(2)+"\n"+
 "║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
 "║ Streak : "+pt.winStreak+" wins\n"+
 "║ Total  : "+pt.wins+"W/"+pt.losses+"L\n"+
-"║ Reset  : L1 | Watch 0/"+cfg.watchLoss+"\n"+
 "╚══════════════════════════╝"
     );
     await sendSticker(chatId, WIN_STICKER);
@@ -982,6 +983,7 @@ async function handleLoss(userId, chatId, actual, num, betLevel) {
 "╔══════════════════════════╗\n"+
 "║  🛑 L15 LOSS — BOT STOPPED ║\n"+
 "╠══════════════════════════╣\n"+
+"║ Level  : L"+betLevel+"\n"+
 "║ Loss   : -₹"+amt+"\n"+
 "║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
 "║ Status : AutoBet stopped.\n"+
@@ -989,10 +991,12 @@ async function handleLoss(userId, chatId, actual, num, betLevel) {
         );
     } else if(betLevel < (cfg.maxLvl || 15)){
         const next = getBetAmount(userId, st.level);
+        const nextLevel = st.level;
         await send(chatId,
 "╔══════════════════════════╗\n"+
 "║  ❌ LOSS                 ║\n"+
 "╠══════════════════════════╣\n"+
+"║ Level  : L"+betLevel+" → L"+nextLevel+"\n"+
 "║ Number : "+num+"\n"+
 "║ Result : "+actual+"\n"+
 "║ Loss   : -₹"+amt+"\n"+
