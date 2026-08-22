@@ -674,7 +674,7 @@ function getStatus(userId) {
     return `${state.currentMode || "SAME"} MODE | L${st?.level || 1} | History: ${state.resultHistory.join("")}`;
 }
 
-//  DIRECT FULL-HISTORY PATTERN PREDICTION ENGINE
+//  CALCULATION + WINNING-MODE W/L PATTERN ENGINE
 // ============================================================
 function normalizeSize(value) {
     const v = String(value || "").toUpperCase();
@@ -686,131 +686,143 @@ function sizeOf(row) {
     return fromApi || (Number(row.number) >= 5 ? "B" : "S");
 }
 
-function colorOf(row) {
-    const raw = String(row.color || "").toUpperCase();
-    if (raw.includes("RED")) return "RED";
-    if (raw.includes("GREEN")) return "GREEN";
-    const n = Number(row.number);
-    return n === 0 || n === 2 || n === 4 || n === 6 || n === 8 ? "RED" : "GREEN";
-}
-
 function nextIssueNumber(list) {
     if (!list?.length) return null;
     return (BigInt(list[0].issueNumber) + 1n).toString();
 }
 
-function analyzeDimension(rows, dimension, valueOf) {
-    if (!Array.isArray(rows) || rows.length < 3) return null;
-    const chronological = [...rows].sort((a, b) => {
+function calculateNormalSize(period, currentNumber) {
+    const n = Number(currentNumber);
+    if (!Number.isInteger(n) || n < 0 || n > 9 || n === 0) return null;
+    const nextLast3 = Number(String(BigInt(period) + 1n).slice(-3));
+    const answer = nextLast3 * Math.exp(n);
+    const noDecimal = answer.toString().replace(".", "");
+    const first14 = noDecimal.substring(0, 14);
+    if (!first14) return null;
+    const lastDigit = Number(first14.charAt(first14.length - 1));
+    return lastDigit <= 4 ? "S" : "B";
+}
+
+function oppositeSize(value) {
+    return value === "B" ? "S" : "B";
+}
+
+function buildWinningModeHistory(list) {
+    const rows = [...list].sort((a, b) => {
         const aa = BigInt(a.issueNumber), bb = BigInt(b.issueNumber);
         return aa < bb ? -1 : aa > bb ? 1 : 0;
     });
-    const values = chronological.map(valueOf);
-    const latestValue = values[values.length - 1];
-    if (!latestValue) return null;
-
-    const globalCounts = {};
-    for (const value of values) if (value) globalCounts[value] = (globalCounts[value] || 0) + 1;
-
-    const patternCounts = {};
-    const continuations = {};
-    let selectedPattern = null;
-    let selectedContinuation = null;
-
-    // Every pattern length is checked: one value, two values, three values, etc.
-    // Only prior occurrences are used; the current suffix itself has no future
-    // result and therefore cannot leak the target result into the analysis.
-    for (let length = values.length - 1; length >= 1; length--) {
-        const candidate = values.slice(-length).join("|");
-        let matches = 0;
-        const nextCounts = {};
-        for (let i = 0; i + length < values.length; i++) {
-            const pattern = values.slice(i, i + length).join("|");
-            if (pattern !== candidate) continue;
-            matches++;
-            const nextValue = values[i + length];
-            if (nextValue) nextCounts[nextValue] = (nextCounts[nextValue] || 0) + 1;
-        }
-        if (matches > 0 && Object.keys(nextCounts).length > 0) {
-            selectedPattern = candidate.split("|");
-            selectedContinuation = nextCounts;
-            patternCounts[candidate] = matches;
-            continuations[candidate] = nextCounts;
-            break;
-        }
+    const records = [];
+    let simulatedMode = "NORMAL";
+    for (let i = 0; i + 1 < rows.length; i++) {
+        const current = rows[i];
+        const next = rows[i + 1];
+        const currentNumber = Number(current.number ?? current.winNumber ?? 0);
+        const actual = sizeOf(next);
+        const normal = calculateNormalSize(current.issueNumber, currentNumber);
+        if (!normal || !actual) continue;
+        const prediction = simulatedMode === "RECOVERY" ? oppositeSize(normal) : normal;
+        const outcome = prediction === actual ? "W" : "L";
+        records.push({
+            sourcePeriod: String(current.issueNumber),
+            targetPeriod: String(next.issueNumber),
+            modeUsed: simulatedMode,
+            normalPrediction: normal,
+            prediction,
+            actual,
+            outcome
+        });
+        // The historical strategy rotates only after a loss.
+        if (outcome === "L") simulatedMode = simulatedMode === "NORMAL" ? "RECOVERY" : "NORMAL";
     }
-
-    let predictedValue;
-    let selectionRule;
-    if (selectedContinuation) {
-        const candidates = Object.entries(selectedContinuation).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
-        predictedValue = candidates[0][0];
-        selectionRule = "most frequent result after current pattern";
-    } else {
-        predictedValue = Object.entries(globalCounts).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
-        selectionRule = "most frequent full-history result fallback";
-    }
-    if (!predictedValue) return null;
-
-    const patternKey = selectedPattern ? selectedPattern.join("") : "";
-    const continuationTotal = selectedContinuation ? Object.values(selectedContinuation).reduce((a, b) => a + b, 0) : 0;
-    return {
-        dimension,
-        type: dimension,
-        value: predictedValue,
-        mode: "DIRECT_PATTERN",
-        referencePeriod: chronological[chronological.length - 1].issueNumber,
-        referenceValue: latestValue,
-        latestPeriod: chronological[chronological.length - 1].issueNumber,
-        latestCompletedPeriod: chronological[chronological.length - 1].issueNumber,
-        latestCompletedValue: latestValue,
-        pattern: selectedPattern,
-        latestPattern: patternKey,
-        patternLength: selectedPattern ? selectedPattern.length : 0,
-        patternCount: selectedPattern ? (patternCounts[selectedPattern.join("|")] || 0) : 0,
-        continuationCounts: selectedContinuation || {},
-        followingSame: null,
-        followingOpposite: null,
-        pairCount: 0,
-        sameCount: 0,
-        oppositeCount: 0,
-        patternCounts,
-        patternContinuations: continuations,
-        selectionRule,
-        values,
-        strength: (selectedPattern ? selectedPattern.length : 0) * 1000000 + continuationTotal * 1000 + (selectedPattern ? (patternCounts[selectedPattern.join("|")] || 0) : 0)
-    };
+    return { rows, records, wlSequence: records.map(record => record.outcome) };
 }
 
-function decidePrediction(list) {
-    if (!Array.isArray(list) || list.length < 3) return null;
-    const target = nextIssueNumber(list);
-    if (!target) return null;
-    const sizeSignal = analyzeDimension(list, "SIZE", sizeOf);
-    const colorSignal = analyzeDimension(list, "COLOR", colorOf);
-    if (!sizeSignal && !colorSignal) return null;
-
-    // Emit only the category whose current history pattern has the strongest
-    // proven continuation. The other category is intentionally suppressed.
-    const active = !colorSignal ? sizeSignal : !sizeSignal ? colorSignal
-        : (colorSignal.strength > sizeSignal.strength ? colorSignal : sizeSignal);
-
-    return {
-        ...active,
-        val: active.dimension === "SIZE" ? (active.value === "B" ? "BIG" : "SMALL") : active.value,
-        targetPeriod: target,
-        analyzedRows: list.length,
-        signalReason: active.dimension === "COLOR" ? "COLOR direct pattern is stronger" : "BIG/SMALL direct pattern is stronger",
-        history: active.values.join(""),
-        sizeAnalysis: sizeSignal,
-        colorAnalysis: colorSignal,
-        predictionDetails: {
-            activeDimension: active.dimension,
-            rule: active.selectionRule,
-            currentPattern: active.pattern,
-            patternLength: active.patternLength,
-            continuationCounts: active.continuationCounts
+function chooseWinningModeFromPattern(records, fallbackMode) {
+    if (!Array.isArray(records) || records.length < 2) {
+        return { mode: fallbackMode || "NORMAL", pattern: "", patternLength: 0, patternMatches: 0, winningModeCounts: { NORMAL: 0, RECOVERY: 0 }, selection: "state fallback" };
+    }
+    const wl = records.map(record => record.outcome);
+    for (let length = wl.length; length >= 1; length--) {
+        const candidate = wl.slice(-length).join("");
+        let matches = 0;
+        const winningModeCounts = { NORMAL: 0, RECOVERY: 0 };
+        const continuationModeCounts = { NORMAL: 0, RECOVERY: 0 };
+        for (let i = 0; i + length < records.length; i++) {
+            if (wl.slice(i, i + length).join("") !== candidate) continue;
+            matches++;
+            const continuation = records[i + length];
+            continuationModeCounts[continuation.modeUsed]++;
+            if (continuation.outcome === "W") winningModeCounts[continuation.modeUsed]++;
         }
+        if (!matches) continue;
+        const wins = winningModeCounts.NORMAL + winningModeCounts.RECOVERY;
+        const modeTotal = continuationModeCounts.NORMAL + continuationModeCounts.RECOVERY;
+        const sourceCounts = wins > 0 ? winningModeCounts : continuationModeCounts;
+        const mode = sourceCounts.NORMAL >= sourceCounts.RECOVERY ? "NORMAL" : "RECOVERY";
+        return {
+            mode,
+            pattern: candidate,
+            patternLength: length,
+            patternMatches: matches,
+            winningModeCounts,
+            continuationModeCounts,
+            selection: wins > 0 ? "mode that won after matching W/L pattern" : "most common mode after matching pattern"
+        };
+    }
+    return { mode: fallbackMode || "NORMAL", pattern: "", patternLength: 0, patternMatches: 0, winningModeCounts: { NORMAL: 0, RECOVERY: 0 }, selection: "state fallback" };
+}
+
+function decidePrediction(list, currentLevel, userId) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+    initState(userId);
+    const state = userStates[userId];
+    const latest = list[0];
+    const currentPeriod = String(latest.issueNumber);
+    const currentNumber = Number(latest.number ?? latest.winNumber ?? 0);
+    if (!currentPeriod || !Number.isInteger(currentNumber) || currentNumber === 0) return null;
+
+    const targetPeriod = (BigInt(currentPeriod) + 1n).toString();
+    const normalPrediction = calculateNormalSize(currentPeriod, currentNumber);
+    if (!normalPrediction) return null;
+
+    const history = buildWinningModeHistory(list);
+    const fallbackMode = state.currentMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
+    const modeInfo = chooseWinningModeFromPattern(history.records, fallbackMode);
+    const mode = modeInfo.mode;
+    const finalPrediction = mode === "RECOVERY" ? oppositeSize(normalPrediction) : normalPrediction;
+
+    state.currentMode = mode;
+    state.lastPrediction = finalPrediction;
+    return {
+        type: "SIZE",
+        val: finalPrediction === "B" ? "BIG" : "SMALL",
+        conf: modeInfo.patternLength > 0 ? 90 : 70,
+        pat: mode,
+        mode,
+        currentLevel: Number(currentLevel) || 1,
+        targetPeriod,
+        latestCompletedPeriod: currentPeriod,
+        referencePeriod: currentPeriod,
+        referenceValue: currentNumber,
+        currentResult: currentNumber,
+        normalPrediction: normalPrediction === "B" ? "BIG" : "SMALL",
+        pattern: modeInfo.pattern,
+        patternLength: modeInfo.patternLength,
+        patternMatches: modeInfo.patternMatches,
+        wlHistory: history.wlSequence.join(""),
+        analyzedRows: history.rows.length,
+        analyzedCalculations: history.records.length,
+        winningModeCounts: modeInfo.winningModeCounts,
+        continuationModeCounts: modeInfo.continuationModeCounts || {},
+        selectionRule: modeInfo.selection,
+        predictionDetails: {
+            modeRule: mode === "NORMAL" ? "use normal calculation because this mode won after the matching W/L pattern" : "use recovery opposite because this mode won after the matching W/L pattern",
+            formula: "next period last 3 digits × exp(current result), then last digit <= 4 => SMALL else BIG",
+            currentWLPattern: modeInfo.pattern,
+            winningModeCounts: modeInfo.winningModeCounts
+        },
+        calculationHistory: history.records
     };
 }
 //  PREDICT LOOP
@@ -860,7 +872,7 @@ async function runPredict(userId, chatId) {
     if (!next || BigInt(next) <= BigInt(list[0].issueNumber)) { scheduleRun(userId, chatId, 5000); return; }
     if(!rememberPeriod(userId, next)) { scheduleRun(userId, chatId, 2000); return; }
 
-    const signal = decidePrediction(list);
+    const signal = decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); return; }
 
     let abLine = "🤖 AutoBet: OFF";
@@ -888,11 +900,9 @@ async function runPredict(userId, chatId) {
 "║   👑 EARN WITH ME AI    ║\n"+
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
-"║ Signal  : "+(signal.type==="COLOR"?"🎨 "+signal.val:(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL"))+"\n"+
-"║ Type    : "+signal.type+" | Mode: "+signal.mode+"\n"+
-        "║ Ref     : "+signal.referencePeriod+" "+signal.referenceValue+"\n"+
-        "║ Pattern : "+(signal.latestPattern || "N/A")+"\n"+
-        "║ S/O     : "+signal.followingSame+"/"+signal.followingOpposite+"\n"+
+"║ Signal  : "+(signal.val==="BIG"?"🔵 BIG":"🟠 SMALL")+"\n"+
+"║ Mode    : "+signal.mode+"\n"+
+        "║ Normal  : "+signal.normalPrediction+"\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 "╚══════════════════════════╝",
