@@ -68,6 +68,9 @@ let userStates = {};
 let loopTimers = {};
 let resultIntervals = {};
 const predictionPromises = new Map();
+const aiModePromises = new Map();
+const aiModeCache = new Map();
+const MAX_AI_CACHE = 200;
 const MAX_SENT_PERIODS = 1000;
 const MAX_RESULT_HISTORY = 500;
 
@@ -721,7 +724,6 @@ function buildWinningModeHistory(list) {
         return aa < bb ? -1 : aa > bb ? 1 : 0;
     });
     const records = [];
-    let simulatedMode = "NORMAL";
     for (let i = 0; i + 1 < rows.length; i++) {
         const current = rows[i];
         const next = rows[i + 1];
@@ -729,59 +731,115 @@ function buildWinningModeHistory(list) {
         const actual = sizeOf(next);
         const normal = calculateNormalSize(current.issueNumber, currentNumber);
         if (!normal || !actual) continue;
-        const prediction = simulatedMode === "NORMAL" ? oppositeSize(normal) : normal;
-        const outcome = prediction === actual ? "W" : "L";
         records.push({
             sourcePeriod: String(current.issueNumber),
             targetPeriod: String(next.issueNumber),
-            modeUsed: simulatedMode,
             normalPrediction: normal,
-            prediction,
-            actual,
-            outcome
+            actual
         });
-        // The historical strategy rotates only after a loss.
-        if (outcome === "L") simulatedMode = simulatedMode === "NORMAL" ? "RECOVERY" : "NORMAL";
     }
-    return { rows, records, wlSequence: records.map(record => record.outcome) };
+    return { rows, records, wlSequence: records.map(record => record.actual === record.normalPrediction ? "W" : "L") };
+}
+
+// The existing UI names are intentionally preserved: NORMAL uses the recovery/opposite
+// branch and RECOVERY uses the direct normal branch. Both are evaluated independently.
+function predictionForMode(mode, normalPrediction) {
+    return mode === "NORMAL" ? oppositeSize(normalPrediction) : normalPrediction;
+}
+
+function evaluateMode(records, mode, windowSize = 60) {
+    const sample = records.slice(-windowSize);
+    let wins = 0;
+    let weightedWins = 0;
+    let weightedTotal = 0;
+    let recentWins = 0;
+    const n = sample.length;
+    for (let i = 0; i < n; i++) {
+        const row = sample[i];
+        const prediction = predictionForMode(mode, row.normalPrediction);
+        const win = prediction === row.actual;
+        if (win) wins++;
+        if (i >= Math.max(0, n - 10) && win) recentWins++;
+        const weight = i + 1;
+        weightedTotal += weight;
+        if (win) weightedWins += weight;
+    }
+    return {
+        mode,
+        samples: n,
+        wins,
+        losses: n - wins,
+        accuracy: n ? wins / n : 0,
+        weightedAccuracy: weightedTotal ? weightedWins / weightedTotal : 0,
+        recentAccuracy: Math.min(n, 10) ? recentWins / Math.min(n, 10) : 0
+    };
+}
+
+async function decideModeWithAI(records, fallbackMode, userId, currentPeriod) {
+    const fallback = fallbackMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
+    if (process.env.AI_MODE_ENABLED === "false" || !process.env.OPENAI_API_KEY || !process.env.OPENAI_API_BASE) return { mode: fallback, source: "backtest-fallback" };
+    const key = `${userId}:${currentPeriod}`;
+    if (aiModeCache.has(key)) return aiModeCache.get(key);
+    if (aiModePromises.has(userId)) return aiModePromises.get(userId);
+    const n = evaluateMode(records, "NORMAL"), r = evaluateMode(records, "RECOVERY");
+    const task = apiClient.post(`${process.env.OPENAI_API_BASE.replace(/\/$/, "")}/chat/completions`, {
+        model: process.env.AI_MODEL || "gpt-5-mini",
+        messages: [
+            { role: "system", content: "Select only NORMAL or RECOVERY from the supplied backtest. Do not claim certainty or guaranteed wins. Return JSON only." },
+            { role: "user", content: JSON.stringify({ rule: "NORMAL=opposite normal prediction; RECOVERY=direct normal prediction", normal: n, recovery: r, recent: records.slice(-20) }) }
+        ],
+        response_format: { type: "json_schema", json_schema: { name: "mode_choice", strict: true, schema: { type: "object", properties: { mode: { type: "string", enum: ["NORMAL", "RECOVERY"] }, reason: { type: "string" } }, required: ["mode", "reason"], additionalProperties: false } } },
+        max_completion_tokens: 120
+    }, { timeout: 2500 }).then(response => {
+        let data = {}; try { data = JSON.parse(response.data?.choices?.[0]?.message?.content || "{}"); } catch {}
+        const result = { mode: data.mode === "RECOVERY" || data.mode === "NORMAL" ? data.mode : fallback, source: "ai", reason: String(data.reason || "") };
+        aiModeCache.set(key, result);
+        while (aiModeCache.size > MAX_AI_CACHE) aiModeCache.delete(aiModeCache.keys().next().value);
+        return result;
+    }).catch(() => ({ mode: fallback, source: "backtest-fallback" })).finally(() => aiModePromises.delete(userId));
+    aiModePromises.set(userId, task);
+    return task;
 }
 
 function chooseWinningModeFromPattern(records, fallbackMode) {
-    if (!Array.isArray(records) || records.length < 2) {
-        return { mode: fallbackMode || "NORMAL", pattern: "", patternLength: 0, patternMatches: 0, winningModeCounts: { NORMAL: 0, RECOVERY: 0 }, selection: "state fallback" };
-    }
-    const wl = records.map(record => record.outcome);
-    for (let length = wl.length; length >= 1; length--) {
-        const candidate = wl.slice(-length).join("");
-        let matches = 0;
-        const winningModeCounts = { NORMAL: 0, RECOVERY: 0 };
-        const continuationModeCounts = { NORMAL: 0, RECOVERY: 0 };
-        for (let i = 0; i + length < records.length; i++) {
-            if (wl.slice(i, i + length).join("") !== candidate) continue;
-            matches++;
-            const continuation = records[i + length];
-            continuationModeCounts[continuation.modeUsed]++;
-            if (continuation.outcome === "W") winningModeCounts[continuation.modeUsed]++;
-        }
-        if (!matches) continue;
-        const wins = winningModeCounts.NORMAL + winningModeCounts.RECOVERY;
-        const modeTotal = continuationModeCounts.NORMAL + continuationModeCounts.RECOVERY;
-        const sourceCounts = wins > 0 ? winningModeCounts : continuationModeCounts;
-        const mode = sourceCounts.NORMAL >= sourceCounts.RECOVERY ? "NORMAL" : "RECOVERY";
+    const minSamples = 8;
+    if (!Array.isArray(records) || records.length < minSamples) {
+        const mode = fallbackMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
         return {
             mode,
-            pattern: candidate,
-            patternLength: length,
-            patternMatches: matches,
-            winningModeCounts,
-            continuationModeCounts,
-            selection: wins > 0 ? "mode that won after matching W/L pattern" : "most common mode after matching pattern"
+            pattern: "",
+            patternLength: 0,
+            patternMatches: 0,
+            winningModeCounts: { NORMAL: 0, RECOVERY: 0 },
+            continuationModeCounts: { NORMAL: 0, RECOVERY: 0 },
+            modeScores: { NORMAL: evaluateMode(records || [], "NORMAL"), RECOVERY: evaluateMode(records || [], "RECOVERY") },
+            selection: `fallback until ${minSamples} valid historical samples`
         };
     }
-    return { mode: fallbackMode || "NORMAL", pattern: "", patternLength: 0, patternMatches: 0, winningModeCounts: { NORMAL: 0, RECOVERY: 0 }, selection: "state fallback" };
+    const normalScore = evaluateMode(records, "NORMAL");
+    const recoveryScore = evaluateMode(records, "RECOVERY");
+    const scores = { NORMAL: normalScore, RECOVERY: recoveryScore };
+    const margin = normalScore.weightedAccuracy - recoveryScore.weightedAccuracy;
+    let mode;
+    if (Math.abs(margin) >= 0.03) {
+        mode = margin > 0 ? "NORMAL" : "RECOVERY";
+    } else if (normalScore.recentAccuracy !== recoveryScore.recentAccuracy) {
+        mode = normalScore.recentAccuracy > recoveryScore.recentAccuracy ? "NORMAL" : "RECOVERY";
+    } else {
+        mode = fallbackMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
+    }
+    return {
+        mode,
+        pattern: "rolling-backtest",
+        patternLength: Math.min(records.length, 60),
+        patternMatches: records.length,
+        winningModeCounts: { NORMAL: normalScore.wins, RECOVERY: recoveryScore.wins },
+        continuationModeCounts: { NORMAL: normalScore.samples, RECOVERY: recoveryScore.samples },
+        modeScores: scores,
+        selection: `selected by recency-weighted backtest; margin ${(Math.abs(margin) * 100).toFixed(1)} percentage points`
+    };
 }
-
-function decidePrediction(list, currentLevel, userId) {
+async function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || list.length < 2) return null;
     initState(userId);
     const state = userStates[userId];
@@ -796,9 +854,11 @@ function decidePrediction(list, currentLevel, userId) {
 
     const history = buildWinningModeHistory(list);
     const fallbackMode = state.currentMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
-    const modeInfo = chooseWinningModeFromPattern(history.records, fallbackMode);
+    const backtestInfo = chooseWinningModeFromPattern(history.records, fallbackMode);
+    const aiInfo = await decideModeWithAI(history.records, backtestInfo.mode, userId, currentPeriod);
+    const modeInfo = { ...backtestInfo, mode: aiInfo.mode, selection: `${aiInfo.source}: ${aiInfo.reason || backtestInfo.selection}` };
     const mode = modeInfo.mode;
-    const finalPrediction = mode === "NORMAL" ? oppositeSize(normalPrediction) : normalPrediction;
+    const finalPrediction = predictionForMode(mode, normalPrediction);
 
     state.currentMode = mode;
     state.lastPrediction = finalPrediction;
@@ -885,7 +945,7 @@ async function runPredictOnce(userId, chatId) {
 
     const next = nextIssueNumber(list);
     if (!next || BigInt(next) <= BigInt(list[0].issueNumber)) { scheduleRun(userId, chatId, 5000); return; }
-    const signal = decidePrediction(list, st.level, userId);
+    const signal = await decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); return; }
     if(!rememberPeriod(userId, next)) { scheduleRun(userId, chatId, 2000); return; }
 
@@ -1428,7 +1488,7 @@ if(text==="🔢 Set Watch Losses"){
             );
             runPredict(id,msg.chat.id);
         }
-        if(text==="🛑 Stop")   { running[id]=false; clearUserTimers(id); predictionPromises.delete(id); sentPeriods[id]?.clear(); send(msg.chat.id,"🛑 Stopped."); }
+        if(text==="🛑 Stop")   { running[id]=false; clearUserTimers(id); predictionPromises.delete(id); aiModePromises.delete(id); for (const key of aiModeCache.keys()) if (key.startsWith(`${id}:`)) aiModeCache.delete(key); sentPeriods[id]?.clear(); send(msg.chat.id,"🛑 Stopped."); }
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
