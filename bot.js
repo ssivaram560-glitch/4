@@ -729,7 +729,7 @@ function buildWinningModeHistory(list) {
         const actual = sizeOf(next);
         const normal = calculateNormalSize(current.issueNumber, currentNumber);
         if (!normal || !actual) continue;
-        const prediction = simulatedMode === "RECOVERY" ? oppositeSize(normal) : normal;
+        const prediction = simulatedMode === "NORMAL" ? oppositeSize(normal) : normal;
         const outcome = prediction === actual ? "W" : "L";
         records.push({
             sourcePeriod: String(current.issueNumber),
@@ -788,7 +788,7 @@ function decidePrediction(list, currentLevel, userId) {
     const latest = list[0];
     const currentPeriod = String(latest.issueNumber);
     const currentNumber = Number(latest.number ?? latest.winNumber ?? 0);
-    if (!currentPeriod || !Number.isInteger(currentNumber) || currentNumber === 0) return null;
+    if (!currentPeriod || !Number.isInteger(currentNumber)) return null;
 
     const targetPeriod = (BigInt(currentPeriod) + 1n).toString();
     const normalPrediction = calculateNormalSize(currentPeriod, currentNumber);
@@ -798,7 +798,7 @@ function decidePrediction(list, currentLevel, userId) {
     const fallbackMode = state.currentMode === "RECOVERY" ? "RECOVERY" : "NORMAL";
     const modeInfo = chooseWinningModeFromPattern(history.records, fallbackMode);
     const mode = modeInfo.mode;
-    const finalPrediction = mode === "RECOVERY" ? oppositeSize(normalPrediction) : normalPrediction;
+    const finalPrediction = mode === "NORMAL" ? oppositeSize(normalPrediction) : normalPrediction;
 
     state.currentMode = mode;
     state.lastPrediction = finalPrediction;
@@ -825,7 +825,7 @@ function decidePrediction(list, currentLevel, userId) {
         continuationModeCounts: modeInfo.continuationModeCounts || {},
         selectionRule: modeInfo.selection,
         predictionDetails: {
-            modeRule: mode === "NORMAL" ? "use normal calculation because this mode won after the matching W/L pattern" : "use recovery opposite because this mode won after the matching W/L pattern",
+            modeRule: mode === "NORMAL" ? "use recovery opposite because NORMAL mode was selected" : "use normal calculation because RECOVERY mode was selected",
             formula: "next period last 3 digits × exp(current result), then last digit <= 4 => SMALL else BIG",
             currentWLPattern: modeInfo.pattern,
             winningModeCounts: modeInfo.winningModeCounts
