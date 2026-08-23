@@ -1,5 +1,8 @@
 const TelegramBot = require('node-telegram-bot-api');
 const axios       = require('axios');
+const httpAgent  = new (require('http').Agent)({ keepAlive: true, maxSockets: 32, maxFreeSockets: 8, timeout: 10000 });
+const httpsAgent = new (require('https').Agent)({ keepAlive: true, maxSockets: 32, maxFreeSockets: 8, timeout: 10000 });
+const apiClient  = axios.create({ httpAgent, httpsAgent, timeout: 10000, maxContentLength: 1024 * 1024, maxBodyLength: 1024 * 1024 });
 const crypto      = require('crypto');
 const zlib        = require('zlib');
 const puppeteer   = require('puppeteer');
@@ -36,9 +39,9 @@ http.createServer((req, res) => {
 const RENDER_URL = process.env.RENDER_URL || "";
 if (RENDER_URL) {
     setInterval(() => {
-        axios.get(RENDER_URL).catch(() => {});
+        apiClient.get(RENDER_URL).catch(() => {});
         console.log("[PING] Keep-alive ping sent");
-    }, 14 * 60 * 1000);
+    }, 14 * 60 * 1000).unref();
 }
 
 // ============================================================
@@ -64,6 +67,7 @@ let userTokens = {};
 let userStates = {};
 let loopTimers = {};
 let resultIntervals = {};
+const predictionPromises = new Map();
 const MAX_SENT_PERIODS = 1000;
 const MAX_RESULT_HISTORY = 500;
 
@@ -91,7 +95,7 @@ async function logBoth(chatId, msg, isError = false) {
 // ============================================================
 async function fetchList() {
     try {
-        const response = await axios.get(process.env.LUCIFER_API_URL || "https://luciferapi.com/", {
+        const response = await apiClient.get(process.env.LUCIFER_API_URL || "https://luciferapi.com/", {
             headers: { "Accept": "application/json", "User-Agent": "Mozilla/5.0" },
             timeout: 10000
         });
@@ -144,12 +148,12 @@ async function getLiveBalance(userId, chatId = null) {
     };
 
     try {
-        const r = await axios.get(url, { headers, timeout: 5000 });
+        const r = await apiClient.get(url, { headers, timeout: 5000 });
         return await parseBalanceResponse(r);
     } catch (e) {
         if (e.response && e.response.status === 405) {
             try {
-                const r2 = await axios.post(url, {}, { headers, timeout: 5000 });
+                const r2 = await apiClient.post(url, {}, { headers, timeout: 5000 });
                 return await parseBalanceResponse(r2);
             } catch (e2) {
                 const errMsg = e2.response?.data?.msg || e2.message || "API Error";
@@ -205,17 +209,21 @@ function sleep(ms)      { return new Promise(r => setTimeout(r, ms)); }
 function getToken(id)   { return userTokens[id] || GLOBAL_TOKEN || ""; }
 
 function scheduleRun(userId, chatId, delayMs) {
+    if (!running[userId]) return;
     if (loopTimers[userId]) clearTimeout(loopTimers[userId]);
-    loopTimers[userId] = setTimeout(() => {
+    const timer = setTimeout(() => {
+        if (loopTimers[userId] !== timer) return;
         loopTimers[userId] = null;
-        if (running[userId]) runPredict(userId, chatId);
-    }, delayMs);
+        if (running[userId] && !predictionPromises.has(userId)) runPredict(userId, chatId);
+    }, Math.max(250, delayMs));
+    timer.unref?.();
+    loopTimers[userId] = timer;
 }
 
 function clearUserTimers(userId) {
     if (loopTimers[userId]) clearTimeout(loopTimers[userId]);
     loopTimers[userId] = null;
-    if (resultIntervals[userId]) clearInterval(resultIntervals[userId]);
+    if (resultIntervals[userId]) clearTimeout(resultIntervals[userId]);
     resultIntervals[userId] = null;
 }
 
@@ -318,7 +326,7 @@ function makeBetSign(params) {
 // ============================================================
 async function fetchCaptcha() {
     try {
-        const r = await axios.get(CAPTCHA_URL, {
+        const r = await apiClient.get(CAPTCHA_URL, {
             headers: {
                 "Accept": "application/json, text/plain, */*",
                 "Origin": "https://bdgwin8.vip",
@@ -498,7 +506,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level) {
             const timestamp = Math.floor(Date.now() / 1000);
             const payload   = {...params, signature, timestamp};
 
-            const r = await axios.post(BET_URL, payload, {
+            const r = await apiClient.post(BET_URL, payload, {
                 headers: {
                     "authorization":    "Bearer " + token,
                     "content-type":     "application/json",
@@ -693,7 +701,7 @@ function nextIssueNumber(list) {
 
 function calculateNormalSize(period, currentNumber) {
     const n = Number(currentNumber);
-    if (!Number.isInteger(n) || n < 0 || n > 9 || n === 0) return null;
+    if (!Number.isInteger(n) || n < 0 || n > 9) return null;
     const nextLast3 = Number(String(BigInt(period) + 1n).slice(-3));
     const answer = nextLast3 * Math.exp(n);
     const noDecimal = answer.toString().replace(".", "");
@@ -708,7 +716,7 @@ function oppositeSize(value) {
 }
 
 function buildWinningModeHistory(list) {
-    const rows = [...list].sort((a, b) => {
+    const rows = [...list].slice(0, MAX_RESULT_HISTORY).sort((a, b) => {
         const aa = BigInt(a.issueNumber), bb = BigInt(b.issueNumber);
         return aa < bb ? -1 : aa > bb ? 1 : 0;
     });
@@ -848,6 +856,13 @@ function stk(arr, key) {
     return { val, count };
 }
 async function runPredict(userId, chatId) {
+    if (!running[userId] || predictionPromises.has(userId)) return;
+    const task = runPredictOnce(userId, chatId);
+    predictionPromises.set(userId, task);
+    try { return await task; } finally { if (predictionPromises.get(userId) === task) predictionPromises.delete(userId); }
+}
+
+async function runPredictOnce(userId, chatId) {
     if(!running[userId]) return;
     initUser(userId);
     const state = userStates[userId];
@@ -870,10 +885,9 @@ async function runPredict(userId, chatId) {
 
     const next = nextIssueNumber(list);
     if (!next || BigInt(next) <= BigInt(list[0].issueNumber)) { scheduleRun(userId, chatId, 5000); return; }
-    if(!rememberPeriod(userId, next)) { scheduleRun(userId, chatId, 2000); return; }
-
     const signal = decidePrediction(list, st.level, userId);
     if(!signal) { scheduleRun(userId, chatId, 5000); return; }
+    if(!rememberPeriod(userId, next)) { scheduleRun(userId, chatId, 2000); return; }
 
     let abLine = "🤖 AutoBet: OFF";
     let canBet = false;
@@ -929,90 +943,53 @@ async function runPredict(userId, chatId) {
 
 // 4. checkResult - Robust Update & Full UI
 async function checkResult(userId, chatId, target, predicted, predType, betPlaced) {
+    if (resultIntervals[userId]) clearTimeout(resultIntervals[userId]);
     let tries = 0;
-    const cfg = autobetCfg[userId];
-    const st = autobetState[userId];
-    const pt = profitTrack[userId];
-    
-    if (resultIntervals[userId]) clearInterval(resultIntervals[userId]);
-    const iv = setInterval(async () => {
-        if (!running[userId]) { clearInterval(iv); resultIntervals[userId] = null; return; }
+    const poll = async () => {
+        if (!running[userId]) { resultIntervals[userId] = null; return; }
         if (++tries > 25) {
-            clearInterval(iv); resultIntervals[userId] = null;
+            resultIntervals[userId] = null;
             await logBoth(chatId, "⏱ Timeout — checking next period...");
             scheduleRun(userId, chatId, 3000);
             return;
         }
-        const list = await fetchList(); if (!list) return;
-        if (BigInt(list[0].issueNumber) < BigInt(target)) return;
-        clearInterval(iv); resultIntervals[userId] = null;
-
-        const res = list.find(i => i.issueNumber === target) || list[0];
-        const num = parseInt(res.number || res.winNumber || 0);
-        let actual;
-        if (predType === "SIZE") actual = num >= 5 ? "BIG" : "SMALL";
-        else actual = num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN";
-        
-        const win = predicted === actual;
-        const betLevel = st.level; // Save current level before update
-
-        // UPDATE LOGIC (Passing betPlaced to fix L1 repetition)
-        updateAfterResult(userId, win, actual, betPlaced);
-
-        const s = stats[userId];
-        s.total++;
-        if (win) {
-            s.win++; s.winStreak++; s.lossStreak = 0;
-            if (s.winStreak > s.maxWinStreak) s.maxWinStreak = s.winStreak;
-        } else {
-            s.loss++; s.lossStreak++; s.winStreak = 0;
-            if (s.lossStreak > s.maxLossStreak) s.maxLossStreak = s.lossStreak;
-        }
-
-        if (betPlaced) {
-            // BET RESULT DASHBOARD
-            if (win) await handleWin(userId, chatId, actual, num, betLevel);
-            else await handleLoss(userId, chatId, actual, num, betLevel);
-
-            // Profit Check
-            const targetProfit = Number(cfg.targetProfit) || 1000;
-            if (pt.pnl >= targetProfit) {
-                st.isWaiting = true;
-                st.nextStartTime = Date.now() + (Number(cfg.restartDelay) || 1) * 60 * 1000;
-                await send(chatId, "🎯 TARGET REACHED! Bot Paused.");
+        try {
+            const list = await fetchList();
+            if (!list || BigInt(list[0].issueNumber) < BigInt(target)) {
+                const t = setTimeout(poll, 10000); t.unref?.(); resultIntervals[userId] = t; return;
             }
-        } else {
-            // WATCH RESULT DASHBOARD (Full details as requested)
-            if (win) {
-                await send(chatId, 
-                    "╔══════════════════════════╗\n"+
-                    "║  👀 WATCH RESULT: WIN! ✅ ║\n"+
-                    "╠══════════════════════════╣\n"+
-                    "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
-                    "║ Status : Correct Prediction\n"+
-                    "╚══════════════════════════╝"
-                );
-                await sendSticker(chatId, WIN_STICKER);
+            const res = list.find(i => i.issueNumber === target);
+            if (!res) {
+                const t = setTimeout(poll, 10000); t.unref?.(); resultIntervals[userId] = t; return;
+            }
+            resultIntervals[userId] = null;
+            const num = Number(res.number ?? res.winNumber);
+            if (!Number.isInteger(num) || num < 0 || num > 9) { scheduleRun(userId, chatId, 3000); return; }
+            const actual = predType === "SIZE" ? (num >= 5 ? "BIG" : "SMALL") : (num === 0 ? "RED" : num === 5 ? "GREEN" : num % 2 === 0 ? "RED" : "GREEN");
+            const win = predicted === actual;
+            const st = autobetState[userId], cfg = autobetCfg[userId], pt = profitTrack[userId];
+            const betLevel = st.level;
+            updateAfterResult(userId, win, actual, betPlaced);
+            const statsRow = stats[userId];
+            statsRow.total++;
+            if (win) { statsRow.win++; statsRow.winStreak++; statsRow.lossStreak = 0; statsRow.maxWinStreak = Math.max(statsRow.maxWinStreak, statsRow.winStreak); }
+            else { statsRow.loss++; statsRow.lossStreak++; statsRow.winStreak = 0; statsRow.maxLossStreak = Math.max(statsRow.maxLossStreak, statsRow.lossStreak); }
+            if (betPlaced) {
+                if (win) await handleWin(userId, chatId, actual, num, betLevel); else await handleLoss(userId, chatId, actual, num, betLevel);
+                const targetProfit = Number(cfg.targetProfit) || 1000;
+                if (pt.pnl >= targetProfit) { st.isWaiting = true; st.nextStartTime = Date.now() + (Number(cfg.restartDelay) || 1) * 60000; await send(chatId, "🎯 TARGET REACHED! Bot Paused."); }
             } else {
-                await send(chatId, 
-                    "╔══════════════════════════╗\n"+
-                    "║  👀 WATCH RESULT: LOSS ❌ ║\n"+
-                    "╠══════════════════════════╣\n"+
-                    "║ Number : "+num+"\n"+
-                    "║ Result : "+actual+"\n"+
-                    "║ Status : Incorrect Prediction\n"+
-                    "╚══════════════════════════╝"
-                );
-                await sendSticker(chatId, LOSS_STICKER);
+                await send(chatId, `👀 WATCH RESULT: ${win ? "WIN! ✅" : "LOSS ❌"}\nNumber: ${num}\nResult: ${actual}`);
+                await sendSticker(chatId, win ? WIN_STICKER : LOSS_STICKER);
             }
+            scheduleRun(userId, chatId, 8000);
+        } catch (err) {
+            console.error('[RESULT CHECK]', err.message);
+            const t = setTimeout(poll, 10000); t.unref?.(); resultIntervals[userId] = t;
         }
-
-        scheduleRun(userId, chatId, 8000);
-    }, 10000);
-    resultIntervals[userId] = iv;
+    };
+    await poll();
 }
-
 
 // ============================================================
 //  STATS
@@ -1431,7 +1408,7 @@ if(text==="🔢 Set Watch Losses"){
             if(running[id])return send(msg.chat.id,"⚠️ Already running!");
 
             running[id]=true;sentPeriods[id]=new Set();
-            autobetState[id]={level:1,consecutiveLoss:0,inMart:false};
+            autobetState[id]={level:1,consecutiveLoss:0,inMart:false,isWaiting:false,nextStartTime:null};
 
             // Load previous B/S history from API
             const prevList = await fetchList();
@@ -1451,7 +1428,7 @@ if(text==="🔢 Set Watch Losses"){
             );
             runPredict(id,msg.chat.id);
         }
-        if(text==="🛑 Stop")   { running[id]=false; clearUserTimers(id); sentPeriods[id]?.clear(); send(msg.chat.id,"🛑 Stopped."); }
+        if(text==="🛑 Stop")   { running[id]=false; clearUserTimers(id); predictionPromises.delete(id); sentPeriods[id]?.clear(); send(msg.chat.id,"🛑 Stopped."); }
         if(text==="📊 Stats")  showStats(msg.chat.id,id);
         if(text==="💰 Profit") profitReport(msg.chat.id,id);
         if(text==="📩 Contact") send(msg.chat.id,"📩 "+ADMIN_HANDLE+"\nID: "+id);
