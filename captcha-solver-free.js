@@ -400,15 +400,34 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              if (value && typeof value === 'object') {
                  value = value.token || value.accessToken || value.access_token || value.jwt || value.data?.token || value.data?.accessToken || value.data?.access_token;
              }
-             const token = String(value || '').replace(/^Bearer\s+/i, '').replace(/^['\"]|['\"]$/g, '').trim();
-             if (token.length > 20) capturedToken = token;
+
+             let raw = String(value || '').trim();
+             raw = raw.replace(/^Bearer\s+/i, '').replace(/^['\"]|['\"]$/g, '').trim();
+
+             // If storage contains a JSON string, extract its token field.
+             if (raw.startsWith('{')) {
+                 try {
+                     const parsed = JSON.parse(raw);
+                     return setCapturedToken(parsed);
+                 } catch (_) {}
+             }
+
+             // The required value is the complete JWT: header.payload.signature.
+             const token = raw.split(/\s+/)[0].trim();
+             if (token.length > 20 && token.split('.').length === 3) {
+                 capturedToken = token;
+                 console.log(`[LOGIN] Full JWT captured; length=${token.length}`);
+             }
          };
 
          await page.setRequestInterception(true);
          page.on('request', (req) => {
-             const auth = req.headers()['authorization'];
-             if (auth) setCapturedToken(auth);
-             req.continue();
+             try {
+                 const auth = req.headers()['authorization'];
+                 if (auth) setCapturedToken(auth);
+             } finally {
+                 req.continue();
+             }
         });
         
         // Navigate to login page
