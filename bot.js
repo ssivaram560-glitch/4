@@ -78,8 +78,8 @@ let autobetCfg      = {};
 let autobetState   = {};
 let profitTrack    = {};
 let GLOBAL_TOKEN   = "";
-// Tokens are kept only in memory while this bot process is running.
-// Restarting the bot clears tokens and requires login again.
+// Tokens are intentionally kept only in bot.js memory. No token file is created.
+// A Render restart/redeploy requires login again, which is expected for this design.
 
 function normalizeToken(value) {
     if (value && typeof value === 'object') {
@@ -96,12 +96,12 @@ function saveUserToken(userId, value) {
     const token = normalizeToken(value);
     if (!token || token.length < 20) return false;
 
-    // Keep the same runtime token in both stores used by login and AutoBet.
+    // Direct handoff: captchaLogin returns the token and bot.js stores it only in memory.
     userTokens[key] = token;
     if (!userCreds[key]) userCreds[key] = {};
     userCreds[key].token = token;
 
-    console.log(`[TOKEN SAVED] User ${key}; token length=${token.length}`);
+    console.log(`[TOKEN READY] User ${key}; token length=${token.length}`);
     return true;
 }
 
@@ -119,7 +119,7 @@ function isTokenExpiredMessage(message) {
     return /(?:token|access token|jwt)\s+(?:is\s+)?(?:expired|invalid|illegal)|(?:invalid|expired)\s+(?:access\s+)?token|unauthori[sz]ed|authentication\s+failed|login\s+required/.test(text);
 }
 
-let userTokens = {};
+let userTokens = {}; // Runtime-only token cache; deliberately not persisted to a file.
 let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
@@ -1612,7 +1612,7 @@ function addHandlers(){
         const cleanToken = normalizeToken(tok);
         if (cleanToken.length < 20) return send(id,"❌ Token too short!");
         saveUserToken(id, cleanToken);
-        send(id,"✅ Token saved!\n..."+tok.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable");
+        send(id,"✅ Token loaded in bot memory!\n..."+cleanToken.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable");
     });
 
     async function beginUserLogin(id, chatId) {
