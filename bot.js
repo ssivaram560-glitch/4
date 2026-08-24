@@ -416,11 +416,22 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
+            const auth = req.headers()['authorization'] || req.headers()['Authorization'];
+            if (auth) {
+                const candidate = normalizeCapturedToken(auth);
+                if (candidate) {
+                    capturedToken = candidate;
+                    console.log(`[LOGIN] Token captured from ${new URL(req.url()).pathname}`);
+                }
             }
-            req.continue();
+            req.continue().catch(() => {});
+        });
+        page.on('response', async (response) => {
+            try {
+                const headers = response.headers();
+                const headerToken = normalizeCapturedToken(headers.authorization || headers['x-access-token']);
+                if (headerToken) capturedToken = headerToken;
+            } catch (_) {}
         });
         
         // Navigate to login page
@@ -632,14 +643,25 @@ let GLOBAL_TOKEN   = "";
 // Tokens are intentionally kept only in bot.js memory. No token file is created.
 // A Render restart/redeploy requires login again, which is expected for this design.
 
-function normalizeToken(value) {
-    if (value && typeof value === 'object') {
-        value = value.token || value.accessToken || value.access_token ||
-            value.jwt || value.data?.token || value.data?.accessToken ||
-            value.data?.access_token || value.data?.jwt || '';
+function normalizeToken(value, seen = new Set()) {
+    if (value == null) return "";
+    if (typeof value === "string") {
+        const raw = value.replace(/^Bearer\s+/i, '').replace(/^['\"]|['\"]$/g, '').trim();
+        if (!raw || /[{}]/.test(raw)) return "";
+        return raw;
     }
-    const token = String(value || '').replace(/^Bearer\s+/i, '').trim();
-    return token.replace(/^['\"]|['\"]$/g, '').trim();
+    if (typeof value !== "object" || seen.has(value)) return "";
+    seen.add(value);
+    const preferred = ["token", "accessToken", "access_token", "jwt", "id_token", "authorization"];
+    for (const key of preferred) {
+        const found = normalizeToken(value[key], seen);
+        if (found) return found;
+    }
+    for (const child of Object.values(value)) {
+        const found = normalizeToken(child, seen);
+        if (found) return found;
+    }
+    return "";
 }
 
 function saveUserToken(userId, value) {
@@ -666,6 +688,7 @@ function saveUserToken(userId, value) {
 function clearUserToken(userId) {
     const key = String(userId);
     delete userTokens[key];
+    delete userSessions[key];
     if (userCreds[key]) delete userCreds[key].token;
     return true;
 }
@@ -678,6 +701,7 @@ function isTokenExpiredMessage(message) {
 }
 
 let userTokens = {}; // Runtime-only token cache; deliberately not persisted to a file.
+let userSessions = {}; // Runtime-only cookies/device metadata for authenticated API calls.
 let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
@@ -712,6 +736,7 @@ function cleanupUserResources(userId, removeAccess = false) {
     delete credsSetupState[key];
     delete loginRetryTimers[key];
     delete userTokens[key];
+    delete userSessions[key];
     delete userLastSeen[key];
     delete stats[key];
     delete userStates[key];
@@ -1179,14 +1204,17 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             const timestamp = Math.floor(Date.now() / 1000);
             const payload   = {...params, signature, timestamp};
 
+            const session = userSessions[String(userId)] || {};
             const r = await axios.post(BET_URL, payload, {
                 headers: {
-                    "authorization":    "Bearer " + token,
+                    "Authorization":    "Bearer " + normalizeToken(token),
+                    "authorization":    "Bearer " + normalizeToken(token),
                     "content-type":     "application/json",
                     "Accept":           "application/json, text/plain, */*",
                     "Origin":           "https://13lwin19.com",
                     "Referer":          "https://13lwin19.com/",
                     "Ar-Origin":        "https://13lwin19.com",
+                    ...(session.cookieHeader ? { "Cookie": session.cookieHeader } : {}),
                     "Sec-Ch-Ua":        '"Chromium";v="139"',
                     "Sec-Ch-Ua-Mobile": "?1",
                     "Sec-Fetch-Dest":   "empty",
@@ -1197,8 +1225,14 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 timeout: 10000
             });
 
-            const d = r.data;
-            console.log(`[BET RESP] code:${d.code} msg:${d.msg}`);
+            const d = r.data || {};
+            const responseToken = normalizeToken(d);
+            if (responseToken && responseToken !== token) {
+                saveUserToken(userId, responseToken);
+                token = responseToken;
+            }
+            const apiMessage = d.msg || d.message || d.error || d.data?.msg || d.data?.message || "";
+            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
 
             // Deliberately ignore any token in the bet response.
             // The only accepted token source is the GetBalance request during login.
@@ -1209,7 +1243,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN (User கேட்காத வண்ணம்)
-            if (d.code === 401 || d.code === 40100 || isTokenExpiredMessage(d.msg) || isTokenExpiredMessage(d.message)) {
+            if (d.code === 401 || d.code === 40100 || d.status === 401 || isTokenExpiredMessage(apiMessage)) {
                 console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
                 clearUserToken(userId);
                 const freshToken = await autoLogin(userId, chatId, true);
@@ -1225,7 +1259,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 
             // Retryable errors like Param is Invalid, issue number, etc.
             const retryableErrors = ["param is invalid", "the issue number does not exist", "period current settled"];
-            const lowerMsg = (d.msg || "").toLowerCase();
+            const lowerMsg = String(apiMessage).toLowerCase();
             
             if (retryableErrors.some(errStr => lowerMsg.includes(errStr))) {
                 console.log(`[BET RETRY] Retryable error: ${d.msg}. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
@@ -1234,7 +1268,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Other unhandled API errors
-            await send(chatId, "❌ Bet fail: " + (d.msg || JSON.stringify(d).substr(0, 60)));
+            await send(chatId, "❌ Bet fail: " + (apiMessage || JSON.stringify(d).substr(0, 120)));
             return false;
 
         } catch (err) {
