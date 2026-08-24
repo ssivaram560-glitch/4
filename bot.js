@@ -416,14 +416,9 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            const auth = req.headers()['authorization'] || req.headers()['Authorization'];
-            if (auth && /api\/Lottery\//i.test(req.url())) {
-                const candidate = normalizeCapturedToken(auth);
-                if (candidate) {
-                    capturedToken = candidate;
-                    const savedNow = saveUserToken(userId, capturedToken);
-                    console.log(`[LOGIN] ✅ Token captured from API request; cache=${savedNow ? 'ready' : 'failed'}`);
-                }
+            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
+                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
             }
             req.continue();
         });
