@@ -396,20 +396,36 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
  
          let capturedToken = null;
          const normalizeCapturedToken = (value) => {
-             if (value && typeof value === 'object') {
-                 value = value.token || value.accessToken || value.access_token ||
-                     value.jwt || value.data?.token || value.data?.accessToken ||
-                     value.data?.access_token || value.data?.jwt || '';
-             }
              const token = String(value || '').replace(/^Bearer\s+/i, '').trim();
              return token.length >= 20 ? token : null;
+         };
+         const findToken = (value, seen = new Set()) => {
+             if (value == null) return null;
+             if (typeof value === 'string') {
+                 const direct = normalizeCapturedToken(value);
+                 if (direct && !/[{}]/.test(direct)) return direct;
+                 try { return findToken(JSON.parse(value), seen); } catch (_) { return null; }
+             }
+             if (typeof value !== 'object' || seen.has(value)) return null;
+             seen.add(value);
+             for (const key of Object.keys(value)) {
+                 if (/token|jwt|auth/i.test(key)) {
+                     const direct = normalizeCapturedToken(value[key]);
+                     if (direct) return direct;
+                 }
+             }
+             for (const child of Object.values(value)) {
+                 const nested = findToken(child, seen);
+                 if (nested) return nested;
+             }
+             return null;
          };
 
          await page.setRequestInterception(true);
          page.on('request', (req) => {
              try {
                  const auth = req.headers()['authorization'] || req.headers()['x-auth-token'];
-                 const token = normalizeCapturedToken(auth);
+                 const token = findToken(auth);
                  if (token) capturedToken = token;
                  req.continue();
              } catch (_) {
@@ -425,7 +441,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              if (!type.includes('json')) return;
              try {
                  const body = await response.json();
-                 const token = normalizeCapturedToken(body);
+                 const token = findToken(body);
                  if (token) capturedToken = token;
              } catch (_) {}
          });
@@ -564,14 +580,22 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
                     return values;
                 });
                 for (const value of storageToken || []) {
-                    const token = normalizeCapturedToken(value);
+                    const token = findToken(value);
                     if (token) { capturedToken = token; break; }
                 }
             } catch (_) {}
         }
 
+        // Final fallback: some deployments expose the access token only as a cookie.
+        if (!capturedToken) {
+            try {
+                const cookies = await page.cookies();
+                capturedToken = findToken(cookies);
+            } catch (_) {}
+        }
+
         if (capturedToken) {
-            console.log('[LOGIN] ✅ Token captured and returned directly to bot.js');
+            console.log(`[LOGIN] ✅ Token captured and returned directly to bot.js (length=${capturedToken.length})`);
             if (chatId) await logBoth(chatId, `✅ [SUCCESS] Token captured for user ${userId}!`);
             return capturedToken;
         } else {
