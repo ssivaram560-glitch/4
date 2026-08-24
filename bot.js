@@ -414,13 +414,28 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              return null;
          };
 
-       await page.setRequestInterception(true);
+        await page.setRequestInterception(true);
         page.on('request', (req) => {
-            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
+            try {
+                const url = String(req.url() || '');
+                const headers = req.headers() || {};
+                const isGetBalance = url.toLowerCase().includes('getbalance');
+                const auth = headers.authorization || headers.Authorization || '';
+                if (isGetBalance) {
+                    console.log(`[LOGIN] GetBalance request seen; authorization=${auth ? 'present' : 'missing'}`);
+                    const token = normalizeCapturedToken(auth);
+                    if (token) {
+                        capturedToken = token;
+                        console.log(`[LOGIN] ✅ Token captured from GetBalance request; length=${token.length}`);
+                    }
+                }
+                if (typeof req.isInterceptResolutionHandled !== 'function' || !req.isInterceptResolutionHandled()) {
+                    req.continue().catch(() => {});
+                }
+            } catch (err) {
+                console.warn('[LOGIN] Request interceptor error:', err.message);
+                try { req.continue().catch(() => {}); } catch (_) {}
             }
-            req.continue();
         });
         
         // Navigate to login page
@@ -536,9 +551,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         });
         await sleep(3000);
         
-         // === TOKEN CAPTURE (same as your original code) ===
-        // Wait only for the GetBalance request. Storage, cookies, login response,
-        // and other API requests are deliberately not accepted as token sources.
+        // Wait only for the GetBalance Authorization request.
         for (let i = 0; i < 90 && !capturedToken; i++) {
             await new Promise(r => setTimeout(r, 1000));
         }
@@ -647,15 +660,17 @@ function normalizeToken(value) {
 function saveUserToken(userId, value) {
     const key = String(userId);
     const token = normalizeToken(value);
-    if (!token || token.length < 20) return false;
+    if (!token || token.length < 20) {
+        console.error(`[TOKEN SAVE FAILED] user=${key}; invalid token length`);
+        return false;
+    }
 
-    // Direct handoff: captchaLogin returns the token and bot.js stores it only in memory.
+    // The token is held only in this process memory. This is the exact cache used by AutoBet.
     userTokens[key] = token;
-    if (!userCreds[key]) userCreds[key] = {};
-    userCreds[key].token = token;
-
-    console.log(`[TOKEN READY] User ${key}; token length=${token.length}`);
-    return true;
+    const savedToken = normalizeToken(userTokens[key]);
+    const ok = savedToken === token;
+    console.log(`[TOKEN ${ok ? 'SAVED' : 'SAVE FAILED'}] user=${key}; length=${token.length}; cache=${ok ? 'ready' : 'missing'}`);
+    return ok;
 }
 
 function clearUserToken(userId) {
@@ -2172,11 +2187,11 @@ function addHandlers(){
 
         await send(chatId, "🔄 Calling CAPTCHA login...");
         const loginResult = await autoLogin(id, chatId, false);
-        const token = normalizeToken(loginResult) || normalizeToken(getToken(id));
-        if (token) {
-            await send(chatId, "✅ Login Success!\n🔑 Token loaded in bot memory: ..." + token.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
+        const cachedToken = normalizeToken(loginResult) || normalizeToken(getToken(id));
+        if (cachedToken) {
+            await send(chatId, "✅ Login Success!\n🔑 GetBalance token saved in bot memory: ..." + cachedToken.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
         } else {
-            await send(chatId, "❌ Login completed, but token was not received by bot.js. Please try Login again.");
+            await send(chatId, "❌ GetBalance Authorization token capture ஆகவில்லை. Render log-ல் `GetBalance request seen` status check பண்ணு.");
         }
     }
 
