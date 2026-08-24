@@ -1,20 +1,11 @@
 /**
  * ============================================================
  *  FREE CAPTCHA SOLVER FOR goaokk.com / 13llottery LOGIN
- *  ============================================================
- * 
- *  No paid API needed. Uses pixel-level image comparison to find
- *  the puzzle piece gap position, then simulates human-like mouse
- *  drag using Puppeteer.
- * 
- *  Works on Windows with visible Chrome window (headless: false).
- *  Token is captured from the GetBalance API request that happens
- *  after login + navigation to Win Go 30S page.
+ *  (Direct Navigation Version)
  * ============================================================
  */
 
 const puppeteer = require('puppeteer');
-const fs = require('fs');
 const { PNG } = require('pngjs');
 const axios = require('axios');
 
@@ -388,46 +379,30 @@ async function solveCaptcha(page) {
 }
 
 // ============================================================
-//  COMPLETE LOGIN WITH CAPTCHA & WINGO 30S NAVIGATION
+//  COMPLETE LOGIN WITH DIRECT URL NAVIGATION TO WINGO 30S
 // ============================================================
 
 async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     console.log(`[LOGIN] Starting captcha login for user ${userId}...`);
     
-    const browser = await puppeteer.launch({
-        headless: process.env.HEADLESS !== 'false',
-        ...(process.env.CHROME_PATH && fs.existsSync(process.env.CHROME_PATH) ? { executablePath: process.env.CHROME_PATH } : {}),
-        args: [
-            '--no-sandbox',
-            '--disable-setuid-sandbox',
-            '--disable-blink-features=AutomationControlled',
-            '--window-size=1280,800'
-        ]
-    });
-    
-    let capturedToken = null;
-    
-    try {
-        const page = await browser.newPage();
-        
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            window.chrome = { runtime: {} };
-        });
-        
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
-        
-        // === TOKEN CAPTURE FROM GetBalance ===
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
-            }
-            req.continue();
+    let browser;
+     try {
+         browser = await puppeteer.launch({
+             headless: true, 
+             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+         });
+         const page = await browser.newPage();
+         await page.setDefaultNavigationTimeout(90000); 
+         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+ 
+         let capturedToken = null;
+         await page.setRequestInterception(true);
+         page.on('request', (req) => {
+             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
+                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+             }
+             req.continue();
+         
         });
         
         // Navigate to login page
@@ -530,35 +505,20 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             console.log('[LOGIN] ✅ Captcha solved successfully!');
         }
         
-        // === POST-LOGIN NAVIGATION & WINGO 30S CLICK ===
+        // === DIRECT NAVIGATION TO WINGO 30S URL ===
         try {
             await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
         } catch (e) {}
-        await sleep(5000);
+        await sleep(3000);
         
-        // Close any popup overlay if present
-        await page.evaluate(() => {
-            const closeBtn = document.querySelector('.van-icon-cross') || document.querySelector('.close-icon');
-            if (closeBtn) closeBtn.click();
+        console.log('[LOGIN] Navigating directly to WinGo 30S page via URL...');
+        await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
+            waitUntil: 'domcontentloaded',
+            timeout: 10000
         });
-        await sleep(1000);
-
-        // Click on Wingo 30S based on your screenshot
-        await page.evaluate(() => {
-            const elements = Array.from(document.querySelectorAll('div, span, p'));
-            // Screenshot-la irukra "Wingo 30S" text-a thedi click panrom
-            const winGo30Btn = elements.find(el => el.innerText && el.innerText.trim().includes('Wingo 30S'));
-            if (winGo30Btn) {
-                winGo30Btn.click();
-            } else {
-                // Fallback: Lottery menu click panni parpom
-                const lotteryBtn = elements.find(el => el.innerText && el.innerText.trim() === 'Lottery');
-                if (lotteryBtn) lotteryBtn.click();
-            }
-        });
-        await sleep(2000);
+        await sleep(3000);
         
-        // === TOKEN CAPTURE CHECK ===
+         // === TOKEN CAPTURE (same as your original code) ===
         for (let i = 0; i < 50; i++) {
             if (capturedToken) break;
             await new Promise(r => setTimeout(r, 1000));
