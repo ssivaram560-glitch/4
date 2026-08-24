@@ -395,21 +395,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
          let capturedToken = null;
-    try {
-        const page = await browser.newPage();
-        
-        await page.evaluateOnNewDocument(() => {
-            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
-            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
-            window.chrome = { runtime: {} };
-        });
-        
-        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
-        await page.setViewport({ width: 1280, height: 800 });
-        
-        // === TOKEN CAPTURE FROM GetBalance ===
-        await page.setRequestInterception(true);
+         await page.setRequestInterception(true);
          page.on('request', (req) => {
              if (req.url().includes('GetBalance') && req.headers()['authorization']) {
                  capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
@@ -417,7 +403,6 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              req.continue();
          
         });
-        
         
         // Navigate to login page
         await page.goto('https://13llottery.com/login', { 
