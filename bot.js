@@ -648,7 +648,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN (User கேட்காத வண்ணம்)
-            if (d.code === 401 || d.code === 40100 || (d.msg && (d.msg.toLowerCase().includes("token") || d.msg.toLowerCase().includes("expired")))) {
+            if (d.code === 401 || d.code === 40100 || (d.msg && /(?:token|access token|jwt)\s+(?:is\s+)?(?:expired|invalid|illegal)|(?:invalid|expired)\s+(?:access\s+)?token|unauthori[sz]ed|authentication\s+failed|login\s+required/i.test(d.msg))) {
                 console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
                 clearUserToken(userId);
                 const freshToken = await autoLogin(userId, chatId, true);
@@ -680,7 +680,8 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             console.error("[BET ERR]", err.message);
 
             // Handle Axios 401 / Token errors inside catch block
-            if (err.response && (err.response.status === 401 || (err.response.data && err.response.data.msg && (err.response.data.msg.toLowerCase().includes("token") || err.response.data.msg.toLowerCase().includes("expired"))))) {
+            const responseMessage = err.response?.data?.msg || err.response?.data?.message || "";
+            if (err.response && (err.response.status === 401 || /(?:token|access token|jwt)\s+(?:is\s+)?(?:expired|invalid|illegal)|(?:invalid|expired)\s+(?:access\s+)?token|unauthori[sz]ed|authentication\s+failed|login\s+required/i.test(responseMessage))) {
                 console.log("[AUTO RELOGIN] Token error caught via exception. Clearing old token and trying autoLogin...");
                 clearUserToken(userId);
                 const loginSuccess = await autoLogin(userId, chatId, true);
