@@ -418,7 +418,8 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         page.on('request', (req) => {
             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
+                const savedNow = saveUserToken(userId, capturedToken);
+                console.log(`[LOGIN] ✅ Token captured from GetBalance request; cache=${savedNow ? 'ready' : 'failed'}`);
             }
             req.continue();
         });
@@ -2172,11 +2173,17 @@ function addHandlers(){
 
         await send(chatId, "🔄 Calling CAPTCHA login...");
         const loginResult = await autoLogin(id, chatId, false);
-        const cachedToken = normalizeToken(loginResult) || normalizeToken(getToken(id));
+        const returnedToken = normalizeToken(loginResult);
+        if (returnedToken) {
+            // Use exactly the same string key that getToken() and placeBet() use.
+            userTokens[String(id)] = returnedToken;
+        }
+        const cachedToken = normalizeToken(userTokens[String(id)]);
         if (cachedToken) {
+            console.log(`[TOKEN CACHE VERIFIED] user=${String(id)}; length=${cachedToken.length}`);
             await send(chatId, "✅ Login Success!\n🔑 GetBalance token saved in bot memory: ..." + cachedToken.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
         } else {
-            await send(chatId, "❌ GetBalance Authorization token capture ஆகவில்லை. Render log-ல் `GetBalance request seen` status check பண்ணு.");
+            await send(chatId, "❌ GetBalance token கிடைத்தது, ஆனால் bot memory cache-ல் save ஆகவில்லை. Render service restart/redeploy செய்து மீண்டும் Login செய்.");
         }
     }
 
