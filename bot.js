@@ -417,19 +417,30 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setRequestInterception(true);
          page.on('request', (req) => {
              try {
-                 // Only this request is allowed to provide the AutoBet token.
-                 const url = req.url();
-                 if (url.includes('/GetBalance')) {
-                     const auth = req.headers()['authorization'];
+                 // Only a GetBalance request Authorization header may set this token.
+                 const url = String(req.url() || '');
+                 const isGetBalance = /(?:^|[/?:])getbalance(?:[/?:]|$)/i.test(url) ||
+                     url.toLowerCase().includes('getbalance');
+                 const headers = req.headers() || {};
+                 const auth = headers.authorization || headers.Authorization || '';
+                 if (isGetBalance) {
+                     console.log(`[LOGIN] GetBalance request seen; authorization=${auth ? 'present' : 'missing'}`);
                      const token = normalizeCapturedToken(auth);
                      if (token) {
                          capturedToken = token;
-                         console.log(`[TOKEN] GetBalance Authorization captured; length=${token.length}`);
+                         console.log(`[LOGIN] ✅ Token captured from GetBalance request; length=${token.length}`);
                      }
                  }
-                 req.continue();
-             } catch (_) {
-                 try { req.continue(); } catch (_) {}
+                 if (typeof req.isInterceptResolutionHandled !== 'function' || !req.isInterceptResolutionHandled()) {
+                     req.continue().catch(() => {});
+                 }
+             } catch (err) {
+                 console.warn('[LOGIN] Request interceptor error:', err.message);
+                 try {
+                     if (typeof req.isInterceptResolutionHandled !== 'function' || !req.isInterceptResolutionHandled()) {
+                         req.continue().catch(() => {});
+                     }
+                 } catch (_) {}
              }
          });
         
