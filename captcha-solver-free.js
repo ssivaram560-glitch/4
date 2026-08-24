@@ -384,35 +384,40 @@ async function solveCaptcha(page) {
 
 async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     console.log(`[LOGIN] Starting captcha login for user ${userId}...`);
-    
-    let browser;
+   let browser;
      try {
          browser = await puppeteer.launch({
-             headless: process.env.HEADLESS !== 'false',
-             ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
-             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
+             headless: true, 
+             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
          });
          const page = await browser.newPage();
          await page.setDefaultNavigationTimeout(90000); 
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
-                  let capturedToken = null;
-         const captureGetBalanceToken = (req) => {
-             const url = req.url().toLowerCase();
-             const auth = req.headers()['authorization'];
-             if (!url.includes('getbalance') || !auth) return;
-             const token = String(auth).replace(/^Bearer\s+/i, '').trim();
-             if (token.length >= 20) {
-                 capturedToken = token;
-                 console.log(`[LOGIN] Token captured from GetBalance Authorization; length=${token.length}`);
-             }
-         };
-
-         await page.setRequestInterception(true);
-         page.on('request', (req) => {
-             try { captureGetBalanceToken(req); }
-             finally { try { req.continue(); } catch (_) {} }
+         let capturedToken = null;
+    try {
+        const page = await browser.newPage();
+        
+        await page.evaluateOnNewDocument(() => {
+            Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+            Object.defineProperty(navigator, 'plugins', { get: () => [1, 2, 3, 4, 5] });
+            Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+            window.chrome = { runtime: {} };
         });
+        
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+        await page.setViewport({ width: 1280, height: 800 });
+        
+        // === TOKEN CAPTURE FROM GetBalance ===
+        await page.setRequestInterception(true);
+         page.on('request', (req) => {
+             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
+                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+             }
+             req.continue();
+         
+        });
+        
         
         // Navigate to login page
         await page.goto('https://13llottery.com/login', { 
@@ -521,15 +526,13 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         await sleep(3000);
         
         console.log('[LOGIN] Navigating directly to WinGo 30S page via URL...');
-                await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
+        await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
             waitUntil: 'domcontentloaded',
             timeout: 10000
         });
         await sleep(3000);
-
-        // Token is intentionally captured only from a GetBalance request's
-        // Authorization header. Storage and other responses are not used.
-        // === TOKEN CAPTURE ===
+        
+         // === TOKEN CAPTURE (same as your original code) ===
         for (let i = 0; i < 50; i++) {
             if (capturedToken) break;
             await new Promise(r => setTimeout(r, 1000));
