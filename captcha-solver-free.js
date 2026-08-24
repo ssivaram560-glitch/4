@@ -388,46 +388,30 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     let browser;
      try {
          browser = await puppeteer.launch({
-             headless: true, 
-             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
+             headless: process.env.HEADLESS !== 'false',
+             ...(process.env.CHROME_PATH ? { executablePath: process.env.CHROME_PATH } : {}),
+             args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu']
          });
          const page = await browser.newPage();
          await page.setDefaultNavigationTimeout(90000); 
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
                   let capturedToken = null;
-         const setCapturedToken = (value) => {
-             if (value && typeof value === 'object') {
-                 value = value.token || value.accessToken || value.access_token || value.jwt || value.data?.token || value.data?.accessToken || value.data?.access_token;
-             }
-
-             let raw = String(value || '').trim();
-             raw = raw.replace(/^Bearer\s+/i, '').replace(/^['\"]|['\"]$/g, '').trim();
-
-             // If storage contains a JSON string, extract its token field.
-             if (raw.startsWith('{')) {
-                 try {
-                     const parsed = JSON.parse(raw);
-                     return setCapturedToken(parsed);
-                 } catch (_) {}
-             }
-
-             // The required value is the complete JWT: header.payload.signature.
-             const token = raw.split(/\s+/)[0].trim();
-             if (token.length > 20 && token.split('.').length === 3) {
+         const captureGetBalanceToken = (req) => {
+             const url = req.url().toLowerCase();
+             const auth = req.headers()['authorization'];
+             if (!url.includes('getbalance') || !auth) return;
+             const token = String(auth).replace(/^Bearer\s+/i, '').trim();
+             if (token.length >= 20) {
                  capturedToken = token;
-                 console.log(`[LOGIN] Full JWT captured; length=${token.length}`);
+                 console.log(`[LOGIN] Token captured from GetBalance Authorization; length=${token.length}`);
              }
          };
 
          await page.setRequestInterception(true);
          page.on('request', (req) => {
-             try {
-                 const auth = req.headers()['authorization'];
-                 if (auth) setCapturedToken(auth);
-             } finally {
-                 req.continue();
-             }
+             try { captureGetBalanceToken(req); }
+             finally { try { req.continue(); } catch (_) {} }
         });
         
         // Navigate to login page
@@ -543,30 +527,8 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         });
         await sleep(3000);
 
-        // Some versions keep the token in browser storage instead of sending
-        // it in a GetBalance request immediately.
-        if (!capturedToken) {
-            try {
-                const storedValues = await page.evaluate(() => {
-                    const values = [];
-                    for (const storage of [window.localStorage, window.sessionStorage]) {
-                        for (let i = 0; i < storage.length; i++) {
-                            const key = storage.key(i) || '';
-                            const value = storage.getItem(key) || '';
-                            if (/token|access|jwt|auth/i.test(key) || value.length > 20) values.push(value);
-                        }
-                    }
-                    return values;
-                });
-                for (const value of storedValues) {
-                    setCapturedToken(value);
-                    if (capturedToken) break;
-                }
-            } catch (storageError) {
-                console.warn('[LOGIN] Browser token storage read failed:', storageError.message);
-            }
-        }
-
+        // Token is intentionally captured only from a GetBalance request's
+        // Authorization header. Storage and other responses are not used.
         // === TOKEN CAPTURE ===
         for (let i = 0; i < 50; i++) {
             if (capturedToken) break;
