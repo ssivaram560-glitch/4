@@ -417,29 +417,20 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setRequestInterception(true);
          page.on('request', (req) => {
              try {
-                 const auth = req.headers()['authorization'] || req.headers()['x-auth-token'];
-                 const token = findToken(auth);
-                 if (token) capturedToken = token;
+                 // Only this request is allowed to provide the AutoBet token.
+                 const url = req.url();
+                 if (url.includes('/GetBalance')) {
+                     const auth = req.headers()['authorization'];
+                     const token = normalizeCapturedToken(auth);
+                     if (token) {
+                         capturedToken = token;
+                         console.log(`[TOKEN] GetBalance Authorization captured; length=${token.length}`);
+                     }
+                 }
                  req.continue();
              } catch (_) {
                  try { req.continue(); } catch (_) {}
              }
-         });
-
-         // Some versions of the site return the token in a JSON login/balance response
-         // instead of placing it in the Authorization request header.
-         page.on('response', async (response) => {
-             if (capturedToken) return;
-             const type = response.headers()['content-type'] || '';
-             if (!type.includes('json')) return;
-             try {
-                 const responseAuth = response.headers()['authorization'] || response.headers()['x-auth-token'];
-                 const headerToken = findToken(responseAuth);
-                 if (headerToken) { capturedToken = headerToken; return; }
-                 const body = await response.json();
-                 const token = findToken(body);
-                 if (token) capturedToken = token;
-             } catch (_) {}
          });
         
         // Navigate to login page
@@ -556,52 +547,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         await sleep(3000);
         
          // === TOKEN CAPTURE (same as your original code) ===
-        for (let i = 0; i < 90; i++) {
-            if (capturedToken) break;
-            try {
-                const liveValues = await page.evaluate(() => {
-                    const values = [];
-                    for (const storage of [localStorage, sessionStorage]) {
-                        for (let i = 0; i < storage.length; i++) values.push(storage.getItem(storage.key(i)) || '');
-                    }
-                    return values;
-                });
-                for (const value of liveValues || []) {
-                    const token = findToken(value);
-                    if (token) { capturedToken = token; break; }
-                }
-            } catch (_) {}
-            if (!capturedToken) await new Promise(r => setTimeout(r, 1000));
-        }
-        
-        // Last fallback: authenticated SPAs often keep the token in browser storage.
-        if (!capturedToken) {
-            try {
-                const storageToken = await page.evaluate(() => {
-                    const values = [];
-                    for (const storage of [localStorage, sessionStorage]) {
-                        for (let i = 0; i < storage.length; i++) {
-                            const key = storage.key(i) || '';
-                            const value = storage.getItem(key) || '';
-                            if (value) values.push(value);
-                            if (/token|auth|jwt|access/i.test(key)) values.push(key + ':' + value);
-                        }
-                    }
-                    return values;
-                });
-                for (const value of storageToken || []) {
-                    const token = findToken(value);
-                    if (token) { capturedToken = token; break; }
-                }
-            } catch (_) {}
-        }
-
-        // Final fallback: some deployments expose the access token only as a cookie.
-        if (!capturedToken) {
-            try {
-                const cookies = await page.cookies();
-                capturedToken = findToken(cookies);
-            } catch (_) {}
+        // Wait only for the GetBalance request. Storage, cookies, login response,
+        // and other API requests are deliberately not accepted as token sources.
+        for (let i = 0; i < 90 && !capturedToken; i++) {
+            await new Promise(r => setTimeout(r, 1000));
         }
 
         if (capturedToken) {
@@ -954,7 +903,8 @@ function isAdmin(id)    { return adminPasswords[id] !== undefined; }
 function isAdminIn(id)  { return adminLoggedIn[id] === true; }
 function getToken(id) {
     const key = String(id);
-    return normalizeToken(userTokens[key]) || normalizeToken(userCreds[key]?.token) || normalizeToken(GLOBAL_TOKEN) || "";
+    // AutoBet is allowed to use only the token captured from GetBalance.
+    return normalizeToken(userTokens[key]) || "";
 }
 
 function generateKey(days, by) {
@@ -1253,22 +1203,8 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             const d = r.data;
             console.log(`[BET RESP] code:${d.code} msg:${d.msg}`);
 
-            // Token check from response headers/body
-            const newTokenFromResponseHeader = r.headers['authorization'] || r.headers['x-auth-token'];
-            if (newTokenFromResponseHeader) {
-                const cleanNewToken = newTokenFromResponseHeader.replace(/^Bearer\s+/i, "");
-                if (cleanNewToken !== token) {
-                                        saveUserToken(userId, cleanNewToken);
-                    token = normalizeToken(cleanNewToken); // update local variable too
-                    console.log("[TOKEN UPDATE] New token captured from bet response headers!");
-                }
-            }
-
-            if (d.data && d.data.token && d.data.token !== token) {
-                 saveUserToken(userId, d.data.token);
-                 token = normalizeToken(d.data.token);
-                 console.log("[TOKEN UPDATE] New token captured from bet response body!");
-            }
+            // Deliberately ignore any token in the bet response.
+            // The only accepted token source is the GetBalance request during login.
 
             // Success case
             if (d.code === 0 || d.msg === "Succeed" || d.msgCode === 0) {
