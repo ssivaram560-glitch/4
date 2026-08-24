@@ -395,14 +395,20 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setDefaultNavigationTimeout(90000); 
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
-         let capturedToken = null;
+                  let capturedToken = null;
+         const setCapturedToken = (value) => {
+             if (value && typeof value === 'object') {
+                 value = value.token || value.accessToken || value.access_token || value.jwt || value.data?.token || value.data?.accessToken || value.data?.access_token;
+             }
+             const token = String(value || '').replace(/^Bearer\s+/i, '').replace(/^['\"]|['\"]$/g, '').trim();
+             if (token.length > 20) capturedToken = token;
+         };
+
          await page.setRequestInterception(true);
          page.on('request', (req) => {
-             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-             }
+             const auth = req.headers()['authorization'];
+             if (auth) setCapturedToken(auth);
              req.continue();
-         
         });
         
         // Navigate to login page
@@ -512,13 +518,37 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         await sleep(3000);
         
         console.log('[LOGIN] Navigating directly to WinGo 30S page via URL...');
-        await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
+                await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
             waitUntil: 'domcontentloaded',
             timeout: 10000
         });
         await sleep(3000);
-        
-         // === TOKEN CAPTURE (same as your original code) ===
+
+        // Some versions keep the token in browser storage instead of sending
+        // it in a GetBalance request immediately.
+        if (!capturedToken) {
+            try {
+                const storedValues = await page.evaluate(() => {
+                    const values = [];
+                    for (const storage of [window.localStorage, window.sessionStorage]) {
+                        for (let i = 0; i < storage.length; i++) {
+                            const key = storage.key(i) || '';
+                            const value = storage.getItem(key) || '';
+                            if (/token|access|jwt|auth/i.test(key) || value.length > 20) values.push(value);
+                        }
+                    }
+                    return values;
+                });
+                for (const value of storedValues) {
+                    setCapturedToken(value);
+                    if (capturedToken) break;
+                }
+            } catch (storageError) {
+                console.warn('[LOGIN] Browser token storage read failed:', storageError.message);
+            }
+        }
+
+        // === TOKEN CAPTURE ===
         for (let i = 0; i < 50; i++) {
             if (capturedToken) break;
             await new Promise(r => setTimeout(r, 1000));
