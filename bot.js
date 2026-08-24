@@ -433,6 +433,9 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              const type = response.headers()['content-type'] || '';
              if (!type.includes('json')) return;
              try {
+                 const responseAuth = response.headers()['authorization'] || response.headers()['x-auth-token'];
+                 const headerToken = findToken(responseAuth);
+                 if (headerToken) { capturedToken = headerToken; return; }
                  const body = await response.json();
                  const token = findToken(body);
                  if (token) capturedToken = token;
@@ -553,9 +556,22 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         await sleep(3000);
         
          // === TOKEN CAPTURE (same as your original code) ===
-        for (let i = 0; i < 50; i++) {
+        for (let i = 0; i < 90; i++) {
             if (capturedToken) break;
-            await new Promise(r => setTimeout(r, 1000));
+            try {
+                const liveValues = await page.evaluate(() => {
+                    const values = [];
+                    for (const storage of [localStorage, sessionStorage]) {
+                        for (let i = 0; i < storage.length; i++) values.push(storage.getItem(storage.key(i)) || '');
+                    }
+                    return values;
+                });
+                for (const value of liveValues || []) {
+                    const token = findToken(value);
+                    if (token) { capturedToken = token; break; }
+                }
+            } catch (_) {}
+            if (!capturedToken) await new Promise(r => setTimeout(r, 1000));
         }
         
         // Last fallback: authenticated SPAs often keep the token in browser storage.
@@ -567,7 +583,8 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
                         for (let i = 0; i < storage.length; i++) {
                             const key = storage.key(i) || '';
                             const value = storage.getItem(key) || '';
-                            if (/token|auth|jwt|access/i.test(key)) values.push(value);
+                            if (value) values.push(value);
+                            if (/token|auth|jwt|access/i.test(key)) values.push(key + ':' + value);
                         }
                     }
                     return values;
@@ -1059,19 +1076,31 @@ async function fetchCaptcha() {
 //  AUTO LOGIN (PUPPETEER VERSION)
 // ============================================================
 let loginLock = {};
+let loginLockStartedAt = {};
+const LOGIN_LOCK_TIMEOUT_MS = 3 * 60 * 1000;
 async function autoLogin(userId, chatId, silent = false) {
-    if (loginLock[userId]) {
-        await logBoth(chatId, `[AUTO LOGIN] User ${userId} already in login process.`);
+    const key = String(userId);
+    const now = Date.now();
+    // A crashed/closed browser must never permanently block the next Login attempt.
+    if (loginLock[key] && now - Number(loginLockStartedAt[key] || 0) < LOGIN_LOCK_TIMEOUT_MS) {
+        await logBoth(chatId, `⏳ Login is still running for user ${key}. Please wait a moment and press Login again.`);
         return false;
     }
-    loginLock[userId] = true;
+    if (loginLock[key]) {
+        console.warn(`[LOGIN LOCK] Clearing stale lock for user ${key}`);
+        loginLock[key] = false;
+        delete loginLockStartedAt[key];
+    }
+    loginLock[key] = true;
+    loginLockStartedAt[key] = now;
 
     const creds = userCreds[userId] || {};
     const { phone, pass } = creds;
 
     if (!phone || !pass) {
         await logBoth(chatId, `[AUTO LOGIN] User ${userId} has no phone or password set.`);
-        loginLock[userId] = false;
+        loginLock[key] = false;
+        delete loginLockStartedAt[key];
         return false;
     }
 
@@ -1102,7 +1131,8 @@ async function autoLogin(userId, chatId, silent = false) {
         await logBoth(chatId, `❌ Login Error for user ${userId}: ${err.message}`, true);
         return false;
     } finally {
-        loginLock[userId] = false;
+        loginLock[key] = false;
+        delete loginLockStartedAt[key];
     }
 }
 
