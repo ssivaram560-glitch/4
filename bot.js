@@ -249,13 +249,9 @@ async function parseBalanceResponse(r) {
 async function getLiveBalance(userId, chatId = null) {
     let token = getToken(userId);
     
-    // Optional: Auto login if token is missing
-    if (!token && chatId) {
-        const ok = await autoLogin(userId, chatId, true);
-        if (ok) token = getToken(userId);
-    }
-
-    if (!token) return { success: false, message: "No token" };
+    // Do not auto-login just because the token is missing.
+    // Login must be started explicitly from the Login button/command.
+    if (!token) return { success: false, message: "No token - press Login first" };
 
     const url = "https://api.ar-lottery01.com/api/Lottery/GetBalance";
     const headers = {
@@ -565,20 +561,15 @@ async function startLoginWithRetry(userId, chatId) {
 // ============================================================
 // ============================================================
 async function placeBet(userId, chatId, period, prediction, predType, level, amountOverride) {
-    let token = getToken(userId);
+    // Missing token is not a relogin trigger. The user must press Login first.
+    let token = normalizeToken(getToken(userId));
     if (!token || token.length < 20) {
-        console.log("[PLACE BET] Token missing or invalid, attempting autoLogin...");
-        const freshToken = await autoLogin(userId, chatId, true);
-        token = normalizeToken(freshToken) || getToken(userId);
-        if (!token || token.length < 20) {
-            await send(chatId, "❌ Token இல்லை! Auto-login தோல்வியடைந்தது.");
-            return false;
-        }
-        console.log(`[PLACE BET] Fresh token loaded; length=${token.length}`);
+        await send(chatId, "❌ Token இல்லை. முதலில் 🔐 Login press பண்ணு.");
+        return false;
     }
 
-    // Always re-read the normalized per-user token immediately before the request.
-    token = normalizeToken(token) || getToken(userId);
+    // Always re-read the normalized in-memory token immediately before the request.
+    token = normalizeToken(getToken(userId));
     if (!token || token.length < 20) {
         await send(chatId, '❌ Token missing before bet request.');
         return false;
@@ -1627,7 +1618,13 @@ function addHandlers(){
         }
 
         await send(chatId, "🔄 Calling CAPTCHA login...");
-        await autoLogin(id, chatId, false);
+        const loginResult = await autoLogin(id, chatId, false);
+        const token = normalizeToken(loginResult) || normalizeToken(getToken(id));
+        if (token) {
+            await send(chatId, "✅ Login Success!\n🔑 Token loaded in bot memory: ..." + token.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
+        } else {
+            await send(chatId, "❌ Login completed, but token was not received by bot.js. Please try Login again.");
+        }
     }
 
     bot.onText(/^\/login(?:@\w+)?$/, async (msg) => {
@@ -1674,7 +1671,8 @@ function addHandlers(){
             userCreds[id].phone = s.phone;
             userCreds[id].pass = s.pass;
             delete credsSetupState[id];
-            startLoginWithRetry(id, chatId);
+            // Run one explicit login attempt only. Automatic relogin is reserved for token expiry/401.
+            await beginUserLogin(id, chatId);
         } else if (data === "creds_confirm_no") {
             credsSetupState[id] = { step: 1 };
             send(chatId, "🔁 Let's try again.\n\n📱 Please enter your Mobile Number (e.g. 916381605525):");
@@ -1848,14 +1846,9 @@ function addHandlers(){
 
         if(text==="✅ Enable AutoBet"){
             const creds=userCreds[id]||{};
-            if(!getToken(id)&&!creds.phone)return send(id,"❌ /setcreds FULLPHONE PASSWORD\nor /setmytoken TOKEN");
+            if(!getToken(id))return send(id,"❌ Token இல்லை. முதலில் 🔐 Login press பண்ணி login complete பண்ணு.",{reply_markup:autobetMenu});
             autobetCfg[id].enabled=true;
-            if(!getToken(id)&&creds.phone){
-                send(id,"🔄 Auto login...");
-                const ok=await autoLogin(id,msg.chat.id,true);
-                if(ok)send(id,"✅ AutoBet ON!\n₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
-                else send(id,"⚠️ Login fail. /setcreds பண்ணு.",{reply_markup:autobetMenu});
-            } else {
+            {
                 send(id,"✅ AutoBet ON!\n₹"+autobetCfg[id].baseBet+" | Watch:"+(autobetCfg[id].watch?autobetCfg[id].watchLoss+"L":"OFF"),{reply_markup:userMenu(id)});
             }
             return;
