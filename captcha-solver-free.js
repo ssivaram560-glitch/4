@@ -395,14 +395,40 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
          let capturedToken = null;
+         const normalizeCapturedToken = (value) => {
+             if (value && typeof value === 'object') {
+                 value = value.token || value.accessToken || value.access_token ||
+                     value.jwt || value.data?.token || value.data?.accessToken ||
+                     value.data?.access_token || value.data?.jwt || '';
+             }
+             const token = String(value || '').replace(/^Bearer\s+/i, '').trim();
+             return token.length >= 20 ? token : null;
+         };
+
          await page.setRequestInterception(true);
          page.on('request', (req) => {
-             if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                 capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+             try {
+                 const auth = req.headers()['authorization'] || req.headers()['x-auth-token'];
+                 const token = normalizeCapturedToken(auth);
+                 if (token) capturedToken = token;
+                 req.continue();
+             } catch (_) {
+                 try { req.continue(); } catch (_) {}
              }
-             req.continue();
-         
-        });
+         });
+
+         // Some versions of the site return the token in a JSON login/balance response
+         // instead of placing it in the Authorization request header.
+         page.on('response', async (response) => {
+             if (capturedToken) return;
+             const type = response.headers()['content-type'] || '';
+             if (!type.includes('json')) return;
+             try {
+                 const body = await response.json();
+                 const token = normalizeCapturedToken(body);
+                 if (token) capturedToken = token;
+             } catch (_) {}
+         });
         
         // Navigate to login page
         await page.goto('https://13llottery.com/login', { 
@@ -523,8 +549,29 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             await new Promise(r => setTimeout(r, 1000));
         }
         
+        // Last fallback: authenticated SPAs often keep the token in browser storage.
+        if (!capturedToken) {
+            try {
+                const storageToken = await page.evaluate(() => {
+                    const values = [];
+                    for (const storage of [localStorage, sessionStorage]) {
+                        for (let i = 0; i < storage.length; i++) {
+                            const key = storage.key(i) || '';
+                            const value = storage.getItem(key) || '';
+                            if (/token|auth|jwt|access/i.test(key)) values.push(value);
+                        }
+                    }
+                    return values;
+                });
+                for (const value of storageToken || []) {
+                    const token = normalizeCapturedToken(value);
+                    if (token) { capturedToken = token; break; }
+                }
+            } catch (_) {}
+        }
+
         if (capturedToken) {
-            console.log('[LOGIN] ✅ Token captured successfully!');
+            console.log('[LOGIN] ✅ Token captured and returned directly to bot.js');
             if (chatId) await logBoth(chatId, `✅ [SUCCESS] Token captured for user ${userId}!`);
             return capturedToken;
         } else {
