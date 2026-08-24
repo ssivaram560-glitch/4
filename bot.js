@@ -78,7 +78,8 @@ let autobetCfg      = {};
 let autobetState   = {};
 let profitTrack    = {};
 let GLOBAL_TOKEN   = "";
-const TOKEN_FILE = path.join(__dirname, 'user-tokens.json');
+// Tokens are kept only in memory while this bot process is running.
+// Restarting the bot clears tokens and requires login again.
 
 function normalizeToken(value) {
     if (value && typeof value === 'object') {
@@ -90,55 +91,19 @@ function normalizeToken(value) {
     return token.replace(/^['\"]|['\"]$/g, '').trim();
 }
 
-function loadUserTokens() {
-    try {
-        if (!fs.existsSync(TOKEN_FILE)) return {};
-        const saved = JSON.parse(fs.readFileSync(TOKEN_FILE, 'utf8'));
-        return saved && typeof saved === 'object' ? saved : {};
-    } catch (error) {
-        console.error('[TOKEN LOAD ERROR]', error.message);
-        return {};
-    }
-}
-
 function saveUserToken(userId, value) {
     const token = normalizeToken(value);
     if (!token || token.length < 20) return false;
-    const key = String(userId);
-    const next = { ...userTokens, [key]: token };
-    const tmpFile = TOKEN_FILE + '.tmp';
-    try {
-        fs.mkdirSync(path.dirname(TOKEN_FILE), { recursive: true });
-        fs.writeFileSync(tmpFile, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-        fs.renameSync(tmpFile, TOKEN_FILE);
-        userTokens = next;
-        return true;
-    } catch (error) {
-        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (_) {}
-        console.error('[TOKEN SAVE ERROR]', error.message);
-        return false;
-    }
+    userTokens[String(userId)] = token;
+    return true;
 }
 
 function clearUserToken(userId) {
-    const key = String(userId);
-    if (!Object.prototype.hasOwnProperty.call(userTokens, key)) return true;
-    const next = { ...userTokens };
-    delete next[key];
-    const tmpFile = TOKEN_FILE + '.tmp';
-    try {
-        fs.writeFileSync(tmpFile, JSON.stringify(next, null, 2) + '\n', { mode: 0o600 });
-        fs.renameSync(tmpFile, TOKEN_FILE);
-        userTokens = next;
-        return true;
-    } catch (error) {
-        try { if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile); } catch (_) {}
-        console.error('[TOKEN CLEAR ERROR]', error.message);
-        return false;
-    }
+    delete userTokens[String(userId)];
+    return true;
 }
 
-let userTokens = loadUserTokens();
+let userTokens = {};
 let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
@@ -1473,7 +1438,7 @@ waitLine+"\n"+
 //  KEYBOARDS
 // ============================================================
 function userMenu(id){
-    const rows=[["▶️ Start Prediction"],["⏹ Stop Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔑 My Token"]];
+    const rows=[["▶️ Start Prediction"],["⏹ Stop Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔐 Login"]];
     if(isAdmin(id))rows.push(["👑 Admin Panel"]);
     return{keyboard:rows,resize_keyboard:true};
 }
@@ -1632,19 +1597,23 @@ function addHandlers(){
         send(id,"✅ Token saved!\n..."+tok.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable");
     });
 
-    bot.onText(/^\/login(?:@\w+)?$/, async (msg) => {
-        const id = String(msg.from.id);
-        const chatId = msg.chat.id;
+    async function beginUserLogin(id, chatId) {
+        id = String(id);
         initUser(id);
         if (!hasAccess(id)) return send(chatId, "❌ No access.");
 
         const creds = userCreds[id] || {};
         if (!creds.phone || !creds.pass) {
-            return send(chatId, "❌ First use /setcreds FULLPHONE PASSWORD");
+            credsSetupState[id] = { step: 1 };
+            return send(chatId, "📱 First-time login setup. Enter your mobile number (e.g. 916381605525):");
         }
 
         await send(chatId, "🔄 Calling CAPTCHA login...");
         await autoLogin(id, chatId, false);
+    }
+
+    bot.onText(/^\/login(?:@\w+)?$/, async (msg) => {
+        await beginUserLogin(String(msg.from.id), msg.chat.id);
     });
 
     bot.onText(/\/owner/,(msg)=>{
@@ -1665,6 +1634,17 @@ function addHandlers(){
         const data = cb.data || "";
         const chatId = cb.message && cb.message.chat ? cb.message.chat.id : id;
         try { await bot.answerCallbackQuery(cb.id); } catch (e) {}
+
+        if (data === "login_menu_login") {
+            return beginUserLogin(String(id), chatId);
+        }
+
+        if (data === "login_menu_settoken") {
+            return send(chatId,
+                "🔑 To save or replace your token, send this command:\n\n" +
+                "/setmytoken YOUR_TOKEN\n\n" +
+                "After saving, press 🔐 Login again.");
+        }
 
         if (data === "creds_confirm_yes") {
             const s = credsSetupState[id];
@@ -1949,36 +1929,27 @@ if(text==="🔢 Set Watch Losses"){
 
         if(text==="🔙 Back")return await send(id,"Main Menu",{reply_markup:userMenu(id)});
 
-        if (text === "🔑 My Token") {
+        if (text === "🔐 Login") {
             if (!hasAccess(id)) return send(id, "❌ No access.");
 
             const tok = getToken(id);
             const creds = userCreds[id] || {};
-            const tokenSaved = tok && tok.length > 20;
-            const tokenPreview = tokenSaved ? "..." + tok.slice(-12) : "❌ Not saved";
-            const loginStatus = creds.phone ? "✅ " + creds.phone.slice(0, 6) + "***" : "❌ Not configured";
+            const tokenStatus = tok && tok.length > 20 ? "✅ Saved (..." + tok.slice(-12) + ")" : "❌ Not saved";
+            const credentialStatus = creds.phone ? "✅ Credentials saved" : "❌ First-time setup required";
 
-            if (!tokenSaved) {
-                return send(
-                    id,
-                    "🔑 MY TOKEN\n\n" +
-                    "Token: ❌ Not saved\n" +
-                    "Login: " + loginStatus + "\n\n" +
-                    "Save your token using:\n" +
-                    "/setmytoken YOUR_TOKEN",
-                    { reply_markup: userMenu(id) }
-                );
-            }
-
-            return send(
-                id,
-                "🔑 MY TOKEN\n\n" +
-                "Token: ✅ Saved\n" +
-                "Preview: " + tokenPreview + "\n" +
-                "Login: " + loginStatus + "\n\n" +
-                "To replace it, use:\n" +
-                "/setmytoken NEW_TOKEN",
-                { reply_markup: userMenu(id) }
+            return send(id,
+                "🔐 LOGIN\n\n" +
+                "Token: " + tokenStatus + "\n" +
+                "Credentials: " + credentialStatus + "\n\n" +
+                "Choose an option:",
+                {
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: "/setmytoken", callback_data: "login_menu_settoken" },
+                            { text: "/login", callback_data: "login_menu_login" }
+                        ]]
+                    }
+                }
             );
         }
 
