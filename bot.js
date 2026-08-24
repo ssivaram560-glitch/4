@@ -414,35 +414,14 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              return null;
          };
 
-         await page.setRequestInterception(true);
-         page.on('request', (req) => {
-             try {
-                 // Only a GetBalance request Authorization header may set this token.
-                 const url = String(req.url() || '');
-                 const isGetBalance = /(?:^|[/?:])getbalance(?:[/?:]|$)/i.test(url) ||
-                     url.toLowerCase().includes('getbalance');
-                 const headers = req.headers() || {};
-                 const auth = headers.authorization || headers.Authorization || '';
-                 if (isGetBalance) {
-                     console.log(`[LOGIN] GetBalance request seen; authorization=${auth ? 'present' : 'missing'}`);
-                     const token = normalizeCapturedToken(auth);
-                     if (token) {
-                         capturedToken = token;
-                         console.log(`[LOGIN] ✅ Token captured from GetBalance request; length=${token.length}`);
-                     }
-                 }
-                 if (typeof req.isInterceptResolutionHandled !== 'function' || !req.isInterceptResolutionHandled()) {
-                     req.continue().catch(() => {});
-                 }
-             } catch (err) {
-                 console.warn('[LOGIN] Request interceptor error:', err.message);
-                 try {
-                     if (typeof req.isInterceptResolutionHandled !== 'function' || !req.isInterceptResolutionHandled()) {
-                         req.continue().catch(() => {});
-                     }
-                 } catch (_) {}
-             }
-         });
+       await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
+                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
+                console.log('[LOGIN] ✅ Token captured from GetBalance request!');
+            }
+            req.continue();
+        });
         
         // Navigate to login page
         await page.goto('https://13llottery.com/login', { 
