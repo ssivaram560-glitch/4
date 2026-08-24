@@ -416,10 +416,14 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            if (req.url().includes('GetBalance') && req.headers()['authorization']) {
-                capturedToken = req.headers()['authorization'].replace(/^Bearer\s+/i, "");
-                const savedNow = saveUserToken(userId, capturedToken);
-                console.log(`[LOGIN] ✅ Token captured from GetBalance request; cache=${savedNow ? 'ready' : 'failed'}`);
+            const auth = req.headers()['authorization'] || req.headers()['Authorization'];
+            if (auth && /api\/Lottery\//i.test(req.url())) {
+                const candidate = normalizeCapturedToken(auth);
+                if (candidate) {
+                    capturedToken = candidate;
+                    const savedNow = saveUserToken(userId, capturedToken);
+                    console.log(`[LOGIN] ✅ Token captured from API request; cache=${savedNow ? 'ready' : 'failed'}`);
+                }
             }
             req.continue();
         });
@@ -647,14 +651,19 @@ function saveUserToken(userId, value) {
     const key = String(userId);
     const token = normalizeToken(value);
     if (!token || token.length < 20) {
-        console.error(`[TOKEN SAVE FAILED] user=${key}; invalid token length`);
+        console.error(`[TOKEN SAVE FAILED] user=${key}; invalid token`);
         return false;
     }
 
-    // The token is held only in this process memory. This is the exact cache used by AutoBet.
+    // Keep one canonical value, while mirroring it to the legacy credential object.
+    // This prevents login success followed by a missing token when callers use different stores.
     userTokens[key] = token;
-    const savedToken = normalizeToken(userTokens[key]);
-    const ok = savedToken === token;
+    if (!userCreds[key]) userCreds[key] = {};
+    userCreds[key].token = token;
+
+    const cached = normalizeToken(userTokens[key]);
+    const mirrored = normalizeToken(userCreds[key].token);
+    const ok = cached === token && mirrored === token;
     console.log(`[TOKEN ${ok ? 'SAVED' : 'SAVE FAILED'}] user=${key}; length=${token.length}; cache=${ok ? 'ready' : 'missing'}`);
     return ok;
 }
@@ -670,7 +679,7 @@ function clearUserToken(userId) {
 // Normal bet errors must never clear a valid token.
 function isTokenExpiredMessage(message) {
     const text = String(message || '').toLowerCase().trim();
-    return /(?:token|access token|jwt)\s+(?:is\s+)?(?:expired|invalid|illegal)|(?:invalid|expired)\s+(?:access\s+)?token|unauthori[sz]ed|authentication\s+failed|login\s+required/.test(text);
+    return /(?:token|access token|jwt)\s+(?:is\s+)?(?:expired|invalid|illegal|missing|required)|(?:invalid|expired|missing|required)\s+(?:access\s+)?token|no token|unauthori[sz]ed|authentication\s+failed|login\s+required/.test(text);
 }
 
 let userTokens = {}; // Runtime-only token cache; deliberately not persisted to a file.
@@ -894,8 +903,10 @@ function isAdmin(id)    { return adminPasswords[id] !== undefined; }
 function isAdminIn(id)  { return adminLoggedIn[id] === true; }
 function getToken(id) {
     const key = String(id);
-    // AutoBet is allowed to use only the token captured from GetBalance.
-    return normalizeToken(userTokens[key]) || "";
+    // Read both stores for compatibility, then repair the canonical cache if needed.
+    const token = normalizeToken(userTokens[key]) || normalizeToken(userCreds[key]?.token) || "";
+    if (token && normalizeToken(userTokens[key]) !== token) userTokens[key] = token;
+    return token;
 }
 
 function generateKey(days, by) {
@@ -1136,8 +1147,8 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
         return false;
     }
 
-    // Always re-read the normalized in-memory token immediately before the request.
-    token = normalizeToken(getToken(userId));
+    // Always re-read the repaired canonical token immediately before the request.
+    token = getToken(String(userId));
     if (!token || token.length < 20) {
         await send(chatId, '❌ Token missing before bet request.');
         return false;
@@ -1203,7 +1214,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN (User கேட்காத வண்ணம்)
-            if (d.code === 401 || d.code === 40100 || isTokenExpiredMessage(d.msg)) {
+            if (d.code === 401 || d.code === 40100 || isTokenExpiredMessage(d.msg) || isTokenExpiredMessage(d.message)) {
                 console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
                 clearUserToken(userId);
                 const freshToken = await autoLogin(userId, chatId, true);
@@ -2174,11 +2185,8 @@ function addHandlers(){
         await send(chatId, "🔄 Calling CAPTCHA login...");
         const loginResult = await autoLogin(id, chatId, false);
         const returnedToken = normalizeToken(loginResult);
-        if (returnedToken) {
-            // Use exactly the same string key that getToken() and placeBet() use.
-            userTokens[String(id)] = returnedToken;
-        }
-        const cachedToken = normalizeToken(userTokens[String(id)]);
+        if (returnedToken) saveUserToken(String(id), returnedToken);
+        const cachedToken = getToken(String(id));
         if (cachedToken) {
             console.log(`[TOKEN CACHE VERIFIED] user=${String(id)}; length=${cachedToken.length}`);
             await send(chatId, "✅ Login Success!\n🔑 GetBalance token saved in bot memory: ..." + cachedToken.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
