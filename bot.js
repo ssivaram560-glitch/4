@@ -725,6 +725,8 @@ let userLastSeen = {};
 const nextRunTimers = new Map();
 const resultCheckTimers = new Map();
 const resultCheckInFlight = new Set();
+// Prevent duplicate result callbacks from sending a second WIN/LOSS box or sticker.
+const settledPeriods = new Map();
 const runInFlight = new Set();
 const loginInFlight = new Map();
 const MAX_SENT_PERIODS = 6;
@@ -741,6 +743,7 @@ function clearUserTimers(userId) {
     if (resultTimer) clearTimeout(resultTimer);
     resultCheckTimers.delete(key);
     resultCheckInFlight.delete(key);
+    settledPeriods.delete(key);
     runInFlight.delete(key);
 }
 
@@ -1996,6 +1999,14 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             scheduleRun(userId, chatId, 5000);
             return;
         }
+
+        // The result endpoint can be read more than once while timers overlap.
+        // Mark this period before sending any notification.
+        const settled = settledPeriods.get(timerKey) || new Set();
+        if (settled.has(String(target))) return;
+        settled.add(String(target));
+        settledPeriods.set(timerKey, settled);
+
         const actualSize = num >= 5 ? "BIG" : "SMALL";
 
         const bets = Array.isArray(placedBets) ? placedBets : [];
@@ -2086,6 +2097,8 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
 
         scheduleRun(userId, chatId, 8000);
         } catch (error) {
+            const settled = settledPeriods.get(timerKey);
+            settled?.delete(String(target));
             releaseResultCheck();
             console.error("[RESULT CHECK ERROR]", error?.message || error);
             if (running[userId]) scheduleRun(userId, chatId, 10000);
