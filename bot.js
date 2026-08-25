@@ -584,7 +584,7 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://13llottery.com/api/Home/Login";
 const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_30S/GetHistoryIssuePage.json";
 const SITE_URL    = "https://v0-happyai5l.vercel.app/";
 const CHROME_ARGS = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
@@ -1275,7 +1275,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    "WinGo_1M", 
+                gameCode:    "WinGo_30S", 
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -1656,7 +1656,66 @@ function oppositeNumberForSize(size) {
     return null;
 }
 
+// Big/Small mode only:
+// DRAW_URL returns newest first. Therefore list[1] is the first/older
+// combination and list[0] is the second/newer combination.
+function predictSizeFromTwoDraws(list) {
+    if (!Array.isArray(list) || list.length < 2) return null;
+
+    const first = parseItem(list[1]);
+    const second = parseItem(list[0]);
+    if (![first, second].every(item => Number.isInteger(item.n) && item.n >= 0 && item.n <= 9)) {
+        return null;
+    }
+
+    const key = `${first.color}-${first.size}|${second.color}-${second.size}`;
+    const mapping = {
+        'RED-BIG|RED-BIG': 'SMALL',
+        'RED-BIG|RED-SMALL': 'SMALL',
+        'RED-SMALL|RED-BIG': 'BIG',
+        'RED-SMALL|RED-SMALL': 'BIG',
+        'RED-BIG|GREEN-BIG': 'SMALL',
+        'RED-BIG|GREEN-SMALL': 'SMALL',
+        'RED-SMALL|GREEN-BIG': 'BIG',
+        'RED-SMALL|GREEN-SMALL': 'SMALL',
+        'GREEN-BIG|GREEN-BIG': 'SMALL',
+        'GREEN-BIG|GREEN-SMALL': 'BIG',
+        'GREEN-SMALL|GREEN-BIG': 'SMALL',
+        'GREEN-SMALL|GREEN-SMALL': 'BIG',
+        'GREEN-BIG|RED-BIG': 'BIG',
+        'GREEN-BIG|RED-SMALL': 'BIG',
+        'GREEN-SMALL|RED-BIG': 'SMALL',
+        'GREEN-SMALL|RED-SMALL': 'BIG'
+    };
+
+    return mapping[key] || null;
+}
+
 async function decidePrediction(_list, currentPeriod, userId) {
+    initUser(userId);
+
+    // Change applies only to Big/Small (SIZE) mode.
+    // NUMBER and COMBINED modes continue through the existing site path.
+    if (autobetCfg[userId]?.mode === 'SIZE') {
+        const predictedSize = predictSizeFromTwoDraws(_list);
+        if (!predictedSize) {
+            userStates[userId].lastPrediction = 'SKIP';
+            userStates[userId].lastNumber = null;
+            userStates[userId].lastReason = 'Two-draw 16-combination rule could not be evaluated';
+            return { skip: true, reason: 'Need two valid previous draws' };
+        }
+
+        userStates[userId].lastPrediction = predictedSize;
+        userStates[userId].lastNumber = null;
+        userStates[userId].lastReason = '16-combination color + size rule';
+
+        return {
+            type: 'SIZE',
+            val: predictedSize,
+            pat: '16-COMBINATION'
+        };
+    }
+
     const result = await readSitePrediction(currentPeriod);
     initState(userId);
 
