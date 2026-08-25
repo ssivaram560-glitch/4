@@ -685,6 +685,28 @@ function saveUserToken(userId, value) {
     return ok;
 }
 
+// Shared token setter used by both manual /setmytoken and automatic login.
+function applyMyToken(userId, rawToken) {
+    const id = String(userId);
+    const cleanToken = normalizeToken(rawToken);
+
+    if (!cleanToken || cleanToken.length < 20) {
+        console.error(`[SETMYTOKEN FAILED] user=${id}; invalid token`);
+        return { ok: false, token: "", reason: "Token too short or invalid" };
+    }
+
+    const saved = saveUserToken(id, cleanToken);
+    const verified = getToken(id) === cleanToken;
+
+    if (!saved || !verified) {
+        console.error(`[SETMYTOKEN FAILED] user=${id}; cache verification failed`);
+        return { ok: false, token: cleanToken, reason: "Token cache verification failed" };
+    }
+
+    console.log(`[SETMYTOKEN AUTO] user=${id}; token saved automatically`);
+    return { ok: true, token: cleanToken };
+}
+
 function clearUserToken(userId) {
     const key = String(userId);
     delete userTokens[key];
@@ -1083,11 +1105,12 @@ async function autoLogin(userId, chatId, silent = false) {
             if (!cleanToken) {
                 throw new Error('captchaLogin returned an empty token');
             }
-            const saved = saveUserToken(userId, cleanToken);
-            if (!saved || normalizeToken(userTokens[String(userId)]) !== cleanToken) {
-                throw new Error('Token captured but could not be saved to userTokens');
+            // Treat the GetBalance token exactly like /setmytoken <token>.
+            const applied = applyMyToken(userId, cleanToken);
+            if (!applied.ok) {
+                throw new Error(applied.reason || 'Token captured but could not be saved');
             }
-            console.log(`[TOKEN SAVED] User ${userId}; token length=${cleanToken.length}`);
+            console.log(`[TOKEN SAVED] User ${userId}; token length=${applied.token.length}`);
             if (!silent) {
                 await logBoth(chatId, `✅ [SUCCESS] Token captured for user ${userId}!`);
             }
@@ -2189,15 +2212,18 @@ function addHandlers(){
     });
 
 
-    bot.onText(/\/setmytoken (.+)/,(msg,match)=>{
-        const id=msg.from.id;
-        if(!hasAccess(id))return send(id,"❌ No access.");
-        const tok=match[1].trim().replace(/^Bearer\s+/i,"");
-        if(tok.length<20)return send(id,"❌ Token too short!");
-        const cleanToken = normalizeToken(tok);
-        if (cleanToken.length < 20) return send(id,"❌ Token too short!");
-        saveUserToken(id, cleanToken);
-        send(id,"✅ Token loaded in bot memory!\n..."+cleanToken.slice(-12)+"\n\n🤖 AutoBet Setup → ✅ Enable");
+    bot.onText(/^\/setmytoken(?:\s+)(.+)$/i, (msg, match) => {
+        const id = String(msg.from.id);
+        if (!hasAccess(id)) return send(id, "❌ No access.");
+
+        const applied = applyMyToken(id, match[1]);
+        if (!applied.ok) return send(id, "❌ " + applied.reason + "!");
+
+        return send(
+            id,
+            "✅ Token loaded in bot memory!\n..." + applied.token.slice(-12) +
+            "\n\n🤖 AutoBet Setup → ✅ Enable"
+        );
     });
 
     async function beginUserLogin(id, chatId) {
@@ -2213,8 +2239,7 @@ function addHandlers(){
 
         await send(chatId, "🔄 Calling CAPTCHA login...");
         const loginResult = await autoLogin(id, chatId, false);
-        const returnedToken = normalizeToken(loginResult);
-        if (returnedToken) saveUserToken(String(id), returnedToken);
+        // autoLogin() already applied the token through applyMyToken().
         const cachedToken = getToken(String(id));
         if (cachedToken) {
             console.log(`[TOKEN CACHE VERIFIED] user=${String(id)}; length=${cachedToken.length}`);
