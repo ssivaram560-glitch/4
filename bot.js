@@ -1541,21 +1541,22 @@ async function readSitePrediction(targetPeriod) {
                 return { skip: true, issue, raw: predictionText, signature: `SKIP:${issue}` };
             }
 
-            // Supports BIG3, BIG / 3, BIG-3, BIG OR 3, SMALL9, etc.
-            const match = predictionText.match(
-                /\b(BIG|SMALL)\s*(?:(?:\/|-|\bOR\b)\s*)?(10|[0-9])\b/
-            );
-            if (!match) {
+            // Read the SIZE first. The site's displayed number is captured
+            // only for logging; it is deliberately not used for our bet.
+            // Examples: BIG-0-8, BIG 3, SMALL9, SMALL OR 7.
+            const sizeMatch = predictionText.match(/\b(BIG|SMALL)\b/);
+            if (!sizeMatch) {
                 return { skip: true, issue, raw: predictionText, signature: `INVALID:${issue}:${predictionText}` };
             }
+            const sourceNumberMatch = predictionText.match(/\b(?:BIG|SMALL)\b[^0-9]*([0-9])\b/);
 
             return {
                 skip: false,
                 issue,
-                side: match[1],
-                number: Number(match[2]),
+                side: sizeMatch[1],
+                sourceNumber: sourceNumberMatch ? Number(sourceNumberMatch[1]) : null,
                 raw: predictionText,
-                signature: `${issue}:${match[1]}:${match[2]}`
+                signature: `${issue}:${sizeMatch[1]}:${predictionText}`
             };
         });
 
@@ -1574,6 +1575,13 @@ async function readSitePrediction(targetPeriod) {
     finally { siteReader.readPromise = null; }
 }
 
+function oppositeNumberForSize(size) {
+    const normalized = String(size || '').toUpperCase();
+    if (normalized === 'BIG') return randomInt(0, 4);   // BIG -> 0,1,2,3,4
+    if (normalized === 'SMALL') return randomInt(5, 9); // SMALL -> 5,6,7,8,9
+    return null;
+}
+
 async function decidePrediction(_list, currentPeriod, userId) {
     const result = await readSitePrediction(currentPeriod);
     initState(userId);
@@ -1585,19 +1593,29 @@ async function decidePrediction(_list, currentPeriod, userId) {
         return { skip: true, reason: result.raw || '13lhack returned SKIP' };
     }
 
-    userStates[userId].lastPrediction = result.side;
-    userStates[userId].lastNumber = result.number;
-    userStates[userId].lastReason = result.pattern;
+    // Confirm SIZE first, then select a number from the opposite range.
+    // BIG => 0..4; SMALL => 5..9. The site's displayed number is ignored.
+    const oppositeNumber = oppositeNumberForSize(result.side);
+    if (oppositeNumber === null) {
+        userStates[userId].lastPrediction = 'SKIP';
+        userStates[userId].lastNumber = null;
+        userStates[userId].lastReason = 'Invalid size from site';
+        return { skip: true, reason: 'Invalid BIG/SMALL value from site' };
+    }
 
-    // Pass the exact size and exact number from 13lhack unchanged.
+    userStates[userId].lastPrediction = result.side;
+    userStates[userId].lastNumber = oppositeNumber;
+    userStates[userId].lastReason = `${result.pattern}; source=${result.sourceNumber ?? '-'}; opposite-range`;
+
     return {
         type: 'COMBINED',
         val: result.side,
-        number: result.number,
+        number: oppositeNumber,
+        sourceNumber: result.sourceNumber,
         pat: result.pattern,
         bets: [
             { type: 'SIZE', val: result.side, kind: 'size' },
-            { type: 'NUMBER', val: result.number, kind: 'number' }
+            { type: 'NUMBER', val: oppositeNumber, kind: 'number' }
         ]
     };
 }
