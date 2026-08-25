@@ -418,13 +418,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         page.on('request', (req) => {
             try {
                 const url = req.url();
-                const headers = req.headers();
-                const authorization = headers.authorization || headers.Authorization;
-
-                // Only accept the token from the GetBalance request.
-                if (url.includes('/api/Lottery/GetBalance') && authorization) {
-                    const token = String(authorization)
-                        .replace(/^Bearer\\s+/i, '')
+                // Only GetBalance's lowercase authorization header is accepted.
+                if (url.includes('GetBalance') && req.headers()['authorization']) {
+                    const token = req.headers()['authorization']
+                        .replace(/^Bearer\s+/i, '')
                         .trim();
 
                     if (token.length >= 20) {
