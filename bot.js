@@ -377,81 +377,53 @@ async function solveCaptcha(page) {
 
 async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     console.log(`[LOGIN] Starting captcha login for user ${userId}...`);
-   let browser;
-     try {
-         browser = await puppeteer.launch({
-             headless: true, 
-             args: ['--no-sandbox', '--disable-setuid-sandbox', '--single-process', '--disable-gpu']
-         });
-         const page = await browser.newPage();
-         await page.setDefaultNavigationTimeout(90000); 
-         await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
- 
+  
+    let browser;
+    let page;
+    
+    try {
+        browser = await puppeteer.launch({
+            headless: true,
+            args: [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--single-process',
+                '--disable-gpu',
+                '--disable-blink-features=AutomationControlled',
+                '--window-size=1280,800'
+            ]
+        });
+
+        page = await browser.newPage();
+        await page.setDefaultNavigationTimeout(90000);
+        await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+
         let capturedToken = null;
         let resolveGetBalanceToken;
         const getBalanceTokenPromise = new Promise((resolve) => {
             resolveGetBalanceToken = resolve;
         });
-        const normalizeCapturedToken = (value) => {
-             const token = String(value || '').replace(/^Bearer\s+/i, '').trim();
-             return token.length >= 20 ? token : null;
-         };
-         const findToken = (value, seen = new Set()) => {
-             if (value == null) return null;
-             if (typeof value === 'string') {
-                 const direct = normalizeCapturedToken(value);
-                 if (direct && !/[{}]/.test(direct)) return direct;
-                 try { return findToken(JSON.parse(value), seen); } catch (_) { return null; }
-             }
-             if (typeof value !== 'object' || seen.has(value)) return null;
-             seen.add(value);
-             for (const key of Object.keys(value)) {
-                 if (/token|jwt|auth/i.test(key)) {
-                     const direct = normalizeCapturedToken(value[key]);
-                     if (direct) return direct;
-                 }
-             }
-             for (const child of Object.values(value)) {
-                 const nested = findToken(child, seen);
-                 if (nested) return nested;
-             }
-             return null;
-         };
 
-        // Capture only the Request Headers -> Authorization value of GetBalance.
-        // CDP sees the same network request shown in Chrome DevTools.
-        const cdp = await page.target().createCDPSession();
-        await cdp.send('Network.enable');
-
-        cdp.on('Network.requestWillBeSent', ({ request }) => {
-            try {
-                if (!/GetBalance/i.test(request.url)) return;
-
-                const headers = request.headers || {};
-                const authorization =
-                    headers.Authorization || headers.authorization;
-
-                if (!authorization || capturedToken) return;
-
-                const token = String(authorization)
-                    .replace(/^Bearer\s+/i, '')
-                    .trim();
-
-                if (token.length >= 20) {
-                    capturedToken = token;
-                    resolveGetBalanceToken(token);
-                    console.log(
-                        `[LOGIN] GetBalance Request Authorization captured; length=${token.length}`
-                    );
-                }
-            } catch (err) {
-                console.error('[LOGIN] GetBalance capture error:', err.message);
-            }
-        });
-
-        // Request interception is only used to allow requests to continue.
+        // === REQUEST INTERCEPTION TO CAPTURE GETBALANCE TOKEN ===
         await page.setRequestInterception(true);
         page.on('request', (req) => {
+            try {
+                if (req.url().includes('GetBalance')) {
+                    const headers = req.headers();
+                    const authHeader = headers['authorization'] || headers['Authorization'];
+                    
+                    if (authHeader && !capturedToken) {
+                        const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+                        if (token.length >= 20) {
+                            capturedToken = token;
+                            resolveGetBalanceToken(token);
+                            console.log(`[LOGIN] ✅ Token captured from GetBalance request! length=${token.length}`);
+                        }
+                    }
+                }
+            } catch (err) {
+                console.error('[LOGIN] Request interception error:', err.message);
+            }
             req.continue().catch(() => {});
         });
         
@@ -555,12 +527,13 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
             console.log('[LOGIN] ✅ Captcha solved successfully!');
         }
         
-        // === DIRECT NAVIGATION TO WINGO 30S URL ===
+        // === REDIRECT TO WINGO PAGE TO TRIGGER GETBALANCE ===
         try {
-            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20000 });
+            await page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 5000 });
         } catch (e) {}
         await sleep(3000);
         
+        console.log('[LOGIN] Navigating to WinGo 30S page to trigger GetBalance request...');
         console.log('[LOGIN] Navigating directly to WinGo 30S page via URL...');
         await page.goto('https://13llottery.com/WinGo/WinGo_30S', {
             waitUntil: 'domcontentloaded',
@@ -568,11 +541,12 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         });
         await sleep(3000);
         
-        // Wait specifically for the authenticated GetBalance request.
+        // Wait specifically for the authenticated GetBalance request if not captured yet.
         if (!capturedToken) {
+            console.log('[LOGIN] Waiting for GetBalance token promise...');
             await Promise.race([
                 getBalanceTokenPromise,
-                new Promise((resolve) => setTimeout(resolve, 90000))
+                new Promise((resolve) => setTimeout(resolve, 15000))
             ]);
         }
 
@@ -595,12 +569,11 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
     }
 }
 
-
 // ============================================================
 //  CONFIG
 // ============================================================
 // Keep secrets outside the source code.
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8868741436:AAHtR52bwP-C7o-gJSpoz8y9IH4y6F-Xui8";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8871633438:AAEX-aqEKqXK50Qh7O0SnNq45C3aSatKBAA";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
@@ -1206,32 +1179,27 @@ async function startLoginWithRetry(userId, chatId) {
 //  IMPROVED PLACE BET FUNCTION (Silent Retries & Multi-Request Fix)
 // ============================================================
 // ============================================================
-async function placeBet(userId, chatId, period, prediction, predType, level, amountOverride) {
-    // Missing token is not a relogin trigger. The user must press Login first.
-    let token = normalizeToken(getToken(userId));
+async function placeBet(userId, chatId, period, prediction, predType, level) {
+    let token = getToken(userId);
     if (!token || token.length < 20) {
-        await send(chatId, "❌ Token இல்லை. முதலில் 🔐 Login press பண்ணு.");
-        return false;
-    }
-
-    // Always re-read the repaired canonical token immediately before the request.
-    token = getToken(String(userId));
-    if (!token || token.length < 20) {
-        await send(chatId, '❌ Token missing before bet request.');
-        return false;
+        console.log("[PLACE BET] Token missing or invalid, attempting autoLogin...");
+        const ok = await autoLogin(userId, chatId, true);
+        if (!ok) { 
+            await send(chatId, "❌ Token இல்லை! Auto-login தோல்வியடைந்தது."); 
+            return false; 
+        }
+        token = getToken(userId);
     }
 
     const cfg       = autobetCfg[userId];
-    const fallbackAmount = cfg.customBets[level-1] || (cfg.baseBet * MULT[level-1]);
-    const betMult   = Number.isFinite(Number(amountOverride)) ? Number(amountOverride) : fallbackAmount;
+    const betMult   = cfg.customBets[level-1] || (cfg.baseBet * MULT[level-1]);
     let bc = "";
 
-    const maxRetries = 5; 
+    const maxRetries = 3; 
     const retryDelayMs = 2000; 
 
-    if (predType === "SIZE") bc = prediction === "BIG" ? "BigSmall_Big" : "BigSmall_Small";
-    if (predType === "NUMBER") bc = "Num_" + String(prediction);
-    if (predType === "COLOR") bc = prediction === "RED" ? "Color_Red" : "Color_Green";
+    if (predType === "SIZE")  bc = prediction === "BIG" ? "BigSmall_Big" : "BigSmall_Small";
+    if (predType === "COLOR") bc = prediction === "RED" ? "Color_Red"    : "Color_Green";
 
     console.log(`[BET] ${bc} ₹${betMult} L${level} for Period: ${period}`);
 
@@ -1251,17 +1219,14 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             const timestamp = Math.floor(Date.now() / 1000);
             const payload   = {...params, signature, timestamp};
 
-            const session = userSessions[String(userId)] || {};
-            const r = await axios.post(BET_URL, payload, {
+            const r = await apiClient.post(BET_URL, payload, {
                 headers: {
-                    "Authorization":    "Bearer " + normalizeToken(token),
-                    "authorization":    "Bearer " + normalizeToken(token),
+                    "authorization":    "Bearer " + token,
                     "content-type":     "application/json",
                     "Accept":           "application/json, text/plain, */*",
-                    "Origin":           "https://13lwin19.com",
-                    "Referer":          "https://13lwin19.com/",
-                    "Ar-Origin":        "https://13lwin19.com",
-                    ...(session.cookieHeader ? { "Cookie": session.cookieHeader } : {}),
+                    "Origin":           "https://bdgwin8.vip",
+                    "Referer":          "https://bdgwin8.vip/",
+                    "Ar-Origin":        "https://bdgwin8.vip",
                     "Sec-Ch-Ua":        '"Chromium";v="139"',
                     "Sec-Ch-Ua-Mobile": "?1",
                     "Sec-Fetch-Dest":   "empty",
@@ -1272,17 +1237,25 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 timeout: 10000
             });
 
-            const d = r.data || {};
-            const responseToken = normalizeToken(d);
-            if (responseToken && responseToken !== token) {
-                saveUserToken(userId, responseToken);
-                token = responseToken;
-            }
-            const apiMessage = d.msg || d.message || d.error || d.data?.msg || d.data?.message || "";
-            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
+            const d = r.data;
+            console.log(`[BET RESP] code:${d.code} msg:${d.msg}`);
 
-            // Deliberately ignore any token in the bet response.
-            // The only accepted token source is the GetBalance request during login.
+            // Token check from response headers/body
+            const newTokenFromResponseHeader = r.headers['authorization'] || r.headers['x-auth-token'];
+            if (newTokenFromResponseHeader) {
+                const cleanNewToken = newTokenFromResponseHeader.replace(/^Bearer\s+/i, "");
+                if (cleanNewToken !== token) {
+                    userTokens[userId] = cleanNewToken;
+                    token = cleanNewToken; // update local variable too
+                    console.log("[TOKEN UPDATE] New token captured from bet response headers!");
+                }
+            }
+
+            if (d.data && d.data.token && d.data.token !== token) {
+                 userTokens[userId] = d.data.token;
+                 token = d.data.token;
+                 console.log("[TOKEN UPDATE] New token captured from bet response body!");
+            }
 
             // Success case
             if (d.code === 0 || d.msg === "Succeed" || d.msgCode === 0) {
@@ -1290,12 +1263,11 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN (User கேட்காத வண்ணம்)
-            if (d.code === 401 || d.code === 40100 || d.status === 401 || isTokenExpiredMessage(apiMessage)) {
-                console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
-                const freshToken = await autoLogin(userId, chatId, true);
-                if (freshToken) {
-                    token = normalizeToken(freshToken) || getToken(userId); // Get fresh token
+            if (d.code === 401 || d.code === 40100 || (d.msg && (d.msg.toLowerCase().includes("token") || d.msg.toLowerCase().includes("expired")))) {
+                console.log("[AUTO RELOGIN] Token expired during bet. Trying autoLogin...");
+                const loginSuccess = await autoLogin(userId, chatId, true);
+                if (loginSuccess) {
+                    token = getToken(userId); // Get fresh token
                     console.log("[AUTO RELOGIN] Success! Retrying the bet with new token...");
                     continue; // Retry the loop with new token
                 } else {
@@ -1306,7 +1278,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 
             // Retryable errors like Param is Invalid, issue number, etc.
             const retryableErrors = ["param is invalid", "the issue number does not exist", "period current settled"];
-            const lowerMsg = String(apiMessage).toLowerCase();
+            const lowerMsg = (d.msg || "").toLowerCase();
             
             if (retryableErrors.some(errStr => lowerMsg.includes(errStr))) {
                 console.log(`[BET RETRY] Retryable error: ${d.msg}. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
@@ -1315,17 +1287,15 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             // Other unhandled API errors
-            await send(chatId, "❌ Bet fail: " + (apiMessage || JSON.stringify(d).substr(0, 120)));
+            await send(chatId, "❌ Bet fail: " + (d.msg || JSON.stringify(d).substr(0, 60)));
             return false;
 
         } catch (err) {
             console.error("[BET ERR]", err.message);
 
             // Handle Axios 401 / Token errors inside catch block
-            const responseMessage = err.response?.data?.msg || err.response?.data?.message || '';
-            if (err.response && (err.response.status === 401 || isTokenExpiredMessage(responseMessage))) {
-                console.log("[AUTO RELOGIN] Token error caught via exception. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
+            if (err.response && (err.response.status === 401 || (err.response.data && err.response.data.msg && (err.response.data.msg.toLowerCase().includes("token") || err.response.data.msg.toLowerCase().includes("expired"))))) {
+                console.log("[AUTO RELOGIN] Token error caught via exception. Trying autoLogin...");
                 const loginSuccess = await autoLogin(userId, chatId, true);
                 if (loginSuccess) {
                     token = getToken(userId);
@@ -1351,6 +1321,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
     console.log("[BET FAIL] All retries exhausted.");
     return false;
 }
+
 // ============================================================
 // ============================================================
 // COMPLETE BOT LOGIC WITH 4-PREDICTION PATTERN MODE EXTENSION & FIXES
