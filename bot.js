@@ -585,7 +585,7 @@ const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://13llottery.com/api/Home/Login";
 const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
 const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
-const SITE_URL    = "https://13lhackultra-7iujlbfzn-ssivaram560-glitchs-projects.vercel.app/";
+const SITE_URL    = "https://ultralux-cp0se5xea-ssivaram560-glitchs-projects.vercel.app/";
 const CHROME_ARGS = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
     '--disable-dev-shm-usage', '--disable-extensions', '--disable-background-networking',
