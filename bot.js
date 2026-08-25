@@ -1179,7 +1179,7 @@ async function startLoginWithRetry(userId, chatId) {
 //  IMPROVED PLACE BET FUNCTION (Silent Retries & Multi-Request Fix)
 // ============================================================
 // ============================================================
-async function placeBet(userId, chatId, period, prediction, predType, level, amountOverride, reloginDone = false) {
+async function placeBet(userId, chatId, period, prediction, predType, level, amountOverride) {
     // Missing token is not a relogin trigger. The user must press Login first.
     let token = normalizeToken(getToken(userId));
     if (!token || token.length < 20) {
@@ -1244,9 +1244,8 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 },
                 timeout: 10000
             });
-            const d = r.data || {};
-            const apiMessage = d.msg || d.message || d.error || "";
-            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
+  const d = r.data;
+            console.log(`[BET RESP] code:${d.code} msg:${d.msg}`);
 
             // Token check from response headers/body
             const newTokenFromResponseHeader = r.headers['authorization'] || r.headers['x-auth-token'];
@@ -1272,35 +1271,32 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN
             if (d.code === 401 || d.code === 40100 || d.status === 401 || isTokenExpiredMessage(apiMessage)) {
-                console.log("[AUTO RELOGIN] Token expired during bet. Keeping old token until a valid new token is returned...");
+                console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
+                clearUserToken(userId);
                 const freshToken = await autoLogin(userId, chatId, true);
                 if (freshToken) {
                     token = normalizeToken(freshToken) || getToken(userId); // Get fresh token
                     console.log("[AUTO RELOGIN] Success! Retrying the bet with new token...");
                     continue; // Retry the loop with new token
                 } else {
-                    console.warn("[AUTO RELOGIN] Failed; continuing within the bounded retry window.");
-                    await sleep(retryDelayMs);
-                    continue;
+                    await send(chatId, "❌ Auto-login failed during token expiry.");
+                    return false;
                 }
             }
 
-            // Retry every non-success API response until maxRetries is reached.
-            if (i < maxRetries - 1) {
-                console.log(`[BET RETRY] API failure: ${apiMessage || "unknown error"}. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
-                await sleep(retryDelayMs);
-                continue;
+            // Retryable errors like Param is Invalid, issue number, etc.
+            const retryableErrors = ["param is invalid", "the issue number does not exist", "period current settled"];
+            const lowerMsg = String(apiMessage).toLowerCase();
+            
+            if (retryableErrors.some(errStr => lowerMsg.includes(errStr))) {
+                console.log(`[BET RETRY] Retryable error: ${d.msg}. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+                continue; 
             }
 
-            if (!reloginDone) {
-                console.log("[BET RECOVERY] Retry window exhausted; re-login once without clearing the current token...");
-                const freshToken = await autoLogin(key, chatId, true);
-                if (freshToken) {
-                    return placeBet(userId, chatId, period, prediction, predType, level, amountOverride, true);
-                }
-            }
-            await send(chatId, "❌ Bet fail after retries and re-login: " + (apiMessage || JSON.stringify(d).slice(0, 160)));
-            return { ok: false, reason: "api_failure", msg: apiMessage };
+            // Other unhandled API errors
+            await send(chatId, "❌ Bet fail: " + (apiMessage || JSON.stringify(d).substr(0, 120)));
+            return false;
 
         } catch (err) {
             console.error("[BET ERR]", err.message);
@@ -1308,34 +1304,28 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             // Handle Axios 401 / Token errors inside catch block
             const responseMessage = err.response?.data?.msg || err.response?.data?.message || '';
             if (err.response && (err.response.status === 401 || isTokenExpiredMessage(responseMessage))) {
-                console.log("[AUTO RELOGIN] Token error caught via exception. Keeping old token until a valid new token is returned...");
+                console.log("[AUTO RELOGIN] Token error caught via exception. Clearing old token and trying autoLogin...");
+                clearUserToken(userId);
                 const loginSuccess = await autoLogin(userId, chatId, true);
                 if (loginSuccess) {
                     token = getToken(userId);
                     continue; // Retry after relogin
                 } else {
-                    console.warn("[AUTO RELOGIN] Failed after Axios auth error; continuing within the bounded retry window.");
-                    await sleep(retryDelayMs);
-                    continue;
+                    await send(chatId, "❌ Auto-login failed during token error.");
+                    return false;
                 }
             }
 
             // For general network errors, retry if attempts left
             if (i < maxRetries - 1) {
                 console.log(`[BET RETRY] Network error. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
-                await sleep(retryDelayMs);
+                await new_Promise_delay(retryDelayMs); // or setTimeout
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
                 continue;
             }
 
-            if (!reloginDone) {
-                console.log("[BET RECOVERY] Network retry window exhausted; re-login once without clearing the current token...");
-                const freshToken = await autoLogin(key, chatId, true);
-                if (freshToken) {
-                    return placeBet(userId, chatId, period, prediction, predType, level, amountOverride, true);
-                }
-            }
-            await send(chatId, "❌ Network error during bet after retries and re-login: " + err.message);
-            return { ok: false, reason: "network_failure", msg: err.message };
+            await send(chatId, "❌ Network error during bet: " + err.message);
+            return false;
         }
     }
 
