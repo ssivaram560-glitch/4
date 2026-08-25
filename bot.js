@@ -727,6 +727,8 @@ const resultCheckTimers = new Map();
 const resultCheckInFlight = new Set();
 // Prevent duplicate result callbacks from sending a second WIN/LOSS box or sticker.
 const settledPeriods = new Map();
+// One prediction/bet dispatch per user and period, even if multiple timers fire.
+const predictionDispatches = new Map();
 const runInFlight = new Set();
 const loginInFlight = new Map();
 const MAX_SENT_PERIODS = 6;
@@ -744,6 +746,7 @@ function clearUserTimers(userId) {
     resultCheckTimers.delete(key);
     resultCheckInFlight.delete(key);
     settledPeriods.delete(key);
+    predictionDispatches.delete(key);
     runInFlight.delete(key);
 }
 
@@ -1861,8 +1864,15 @@ async function runPredict(userId, chatId) {
         runInFlight.delete(runKey);
         return;
     }
-    if (sentPeriods[userId].has(next)) { scheduleRun(userId, chatId, 3000); runInFlight.delete(runKey); return; }
+    const dispatched = predictionDispatches.get(runKey) || new Set();
+    if (sentPeriods[userId].has(next) || dispatched.has(String(next))) {
+        scheduleRun(userId, chatId, 3000);
+        runInFlight.delete(runKey);
+        return;
+    }
     sentPeriods[userId].add(next);
+    dispatched.add(String(next));
+    predictionDispatches.set(runKey, dispatched);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
         sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
     }
@@ -2235,6 +2245,10 @@ function recoverPolling(err) {
     }, 5000);
 }
 function startBot(){
+    if (bot) {
+        console.warn("[BOT] startBot() ignored because polling is already active.");
+        return;
+    }
     if (!BOT_TOKEN) throw new Error("BOT_TOKEN environment variable is required");
     if(bot){try{bot.stopPolling();}catch(e){}}
     bot=new TelegramBot(BOT_TOKEN,{polling:{interval:1000,autoStart:true,params:{timeout:30}}});
@@ -2731,6 +2745,8 @@ if(text==="🔢 Set Watch Losses"){
 
             clearUserTimers(id);
             running[id]=true;sentPeriods[id]=new Set();
+            predictionDispatches.set(String(id), new Set());
+            settledPeriods.delete(String(id));
             autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
 
             // Load previous B/S history from API
