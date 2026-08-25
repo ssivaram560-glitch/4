@@ -1272,8 +1272,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN
             if (d.code === 401 || d.code === 40100 || d.status === 401 || isTokenExpiredMessage(apiMessage)) {
-                console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
+                console.log("[AUTO RELOGIN] Token expired during bet. Keeping old token until a valid new token is returned...");
                 const freshToken = await autoLogin(userId, chatId, true);
                 if (freshToken) {
                     token = normalizeToken(freshToken) || getToken(userId); // Get fresh token
@@ -1294,8 +1293,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             if (!reloginDone) {
-                console.log("[BET RECOVERY] Retry window exhausted; re-login once and retrying the same bet.");
-                clearUserToken(key);
+                console.log("[BET RECOVERY] Retry window exhausted; re-login once without clearing the current token...");
                 const freshToken = await autoLogin(key, chatId, true);
                 if (freshToken) {
                     return placeBet(userId, chatId, period, prediction, predType, level, amountOverride, true);
@@ -1310,8 +1308,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             // Handle Axios 401 / Token errors inside catch block
             const responseMessage = err.response?.data?.msg || err.response?.data?.message || '';
             if (err.response && (err.response.status === 401 || isTokenExpiredMessage(responseMessage))) {
-                console.log("[AUTO RELOGIN] Token error caught via exception. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
+                console.log("[AUTO RELOGIN] Token error caught via exception. Keeping old token until a valid new token is returned...");
                 const loginSuccess = await autoLogin(userId, chatId, true);
                 if (loginSuccess) {
                     token = getToken(userId);
@@ -1331,8 +1328,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             }
 
             if (!reloginDone) {
-                console.log("[BET RECOVERY] Network retry window exhausted; re-login once and retrying the same bet.");
-                clearUserToken(key);
+                console.log("[BET RECOVERY] Network retry window exhausted; re-login once without clearing the current token...");
                 const freshToken = await autoLogin(key, chatId, true);
                 if (freshToken) {
                     return placeBet(userId, chatId, period, prediction, predType, level, amountOverride, true);
