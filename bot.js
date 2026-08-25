@@ -595,8 +595,8 @@ const CHROME_ARGS = [
 
 // Martingale multipliers — user can customize base bet
 const MULT = [1, 3, 9, 27, 81, 243, 729, 2187, 6561, 19683]; // Standard 3x Martingale multipliers
-const SIZE_WIN_MULTIPLIER = 1.85;   // Net profit multiplier for BIG/SMALL wins
-const NUMBER_WIN_MULTIPLIER = 8.95; // Net profit multiplier for exact number wins
+const SIZE_WIN_MULTIPLIER = 1.90;   // Requested BIG/SMALL payout multiplier
+const NUMBER_WIN_MULTIPLIER = 8.90; // Requested exact-number payout multiplier
 
 // ============================================================
 //  RENDER KEEP-ALIVE
@@ -997,6 +997,60 @@ function adminList() {
 function allKeysList() {
     const keys=Object.entries(keyStore);
     return keys.length ? keys.map(([k,v])=>k+" → "+(v.used?"✅ Used":"🟢 "+v.days+"d")).join("\n") : "No keys.";
+}
+
+function ownerMemberDetails() {
+    const now = Date.now();
+    const ids = new Set([
+        ...Object.keys(usersAccess),
+        ...Object.keys(userLastSeen),
+        ...Object.keys(autobetCfg),
+        ...Object.keys(autobetState),
+        ...Object.keys(profitTrack),
+        ...Object.keys(running)
+    ]);
+    ids.delete(String(OWNER_ID));
+    if (!ids.size) return "No members found.";
+
+    const money = value => "₹" + (Number(value) || 0).toFixed(2);
+    const seq = values => Array.isArray(values) && values.length ? values.join(" → ") : "Default";
+
+    return [...ids].sort((a, b) => Number(a) - Number(b)).map(uid => {
+        initUser(uid);
+        const cfg = autobetCfg[uid] || {};
+        const st = autobetState[uid] || {};
+        const pt = profitTrack[uid] || {};
+        const expiry = Number(usersAccess[uid] || 0);
+        const access = expiry > now ? ((expiry - now) / 86400000).toFixed(1) + " days left" : "No active access";
+        const mode = modeLabel(cfg.mode);
+        const levelHistory = Object.entries(st.levelHistory || {})
+            .sort((a, b) => Number(a[0].slice(1)) - Number(b[0].slice(1)))
+            .map(([level, count]) => level + ":" + count).join(" | ") || "None";
+        const sizeWins = levelMapText(stats[uid]?.sizeLevelWins);
+        const numberWins = levelMapText(stats[uid]?.numberLevelWins);
+
+        let out = "👤 MEMBER " + uid + "\n";
+        out += "Access      : " + access + "\n";
+        out += "Running     : " + (running[uid] ? "YES" : "NO") + "\n";
+        out += "Mode        : " + mode + "\n";
+        out += "AutoBet     : " + (cfg.enabled ? "ON" : "OFF") + "\n";
+        out += "Watch       : " + (cfg.watch ? "ON" : "OFF") + " | Loss limit " + (cfg.watchLoss ?? "-") + "\n";
+        out += "Base fund   : " + money(cfg.baseBet) + "\n";
+        out += "Max level   : L" + (cfg.maxLvl || 1) + "\n";
+        out += "Current lvl : L" + (st.level || 1) + " | Size L" + (st.sizeLevel || 1) + " | Number L" + (st.numberLevel || 1) + "\n";
+        out += "Normal fund : " + seq(cfg.customBets) + "\n";
+        out += "Size fund   : " + seq(cfg.customSizeBets) + "\n";
+        out += "Number fund : " + seq(cfg.customNumberBets) + "\n";
+        out += "Target      : " + money(cfg.targetProfit) + " | Restart " + (cfg.restartDelay || 1) + " min\n";
+        out += "Total bet   : " + money(pt.totalBetAmount) + "\n";
+        out += "P&L         : " + (Number(pt.pnl) >= 0 ? "+" : "") + money(pt.pnl) + "\n";
+        out += "Win/Loss    : " + (pt.wins || 0) + "W / " + (pt.losses || 0) + "L\n";
+        out += "Level usage : " + levelHistory + "\n";
+        if (cfg.mode === "COMBINED") out += "Wins by L   : Size " + sizeWins + " | Number " + numberWins + "\n";
+        else out += "Wins by L   : " + levelMapText(stats[uid]?.levelWins) + "\n";
+        out += "------------------------\n";
+        return out;
+    }).join("\n");
 }
 
 // ============================================================
@@ -1413,10 +1467,24 @@ function combinedSettlement(bets, actualSize, actualNumber) {
     const total = sizeAmount + numberAmount;
     const sizeWon = bets.some(b => b.type === "SIZE" && b.val === actualSize);
     const numberWon = numberBets.some(b => Number(b.val) === Number(actualNumber));
-    if (sizeWon) return { won: true, pnl: sizeAmount * SIZE_WIN_MULTIPLIER - numberAmount, reason: "CATEGORY" };
+    // A combined bet has separate stakes. P&L is net profit:
+    // payout from the winning side minus every losing stake.
+    if (sizeWon) {
+        return {
+            won: true,
+            pnl: (sizeAmount * SIZE_WIN_MULTIPLIER) - numberAmount,
+            reason: "SIZE"
+        };
+    }
     if (numberWon) {
-        const winning = numberBets.filter(b => Number(b.val) === Number(actualNumber)).reduce((n, b) => n + Number(b.amt || 0), 0);
-        return { won: true, pnl: winning * NUMBER_WIN_MULTIPLIER - (total - winning), reason: "NUMBER" };
+        const winning = numberBets
+            .filter(b => Number(b.val) === Number(actualNumber))
+            .reduce((n, b) => n + Number(b.amt || 0), 0);
+        return {
+            won: true,
+            pnl: (winning * NUMBER_WIN_MULTIPLIER) - (total - winning),
+            reason: "NUMBER"
+        };
     }
     return { won: false, pnl: -total, reason: "NONE" };
 }
@@ -1655,7 +1723,7 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
     const amt = bets.length ? bets.reduce((sum, b) => sum + Number(b.amt || 0), 0) : getSequenceAmount(userId, betLevel);
     let profit;
     if (settlement) {
-        profit = settlement.pnl;
+        profit = Number(settlement.pnl) || 0;
     } else {
         const numberAmount = bets.filter(b => b.type === "NUMBER").reduce((sum, b) => sum + Number(b.amt || 0), 0);
         const sizeAmount = bets.filter(b => b.type === "SIZE").reduce((sum, b) => sum + Number(b.amt || 0), 0);
@@ -1669,17 +1737,26 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
     pt.winStreak++; pt.lossStreak = 0;
     if(pt.winStreak > pt.maxW) pt.maxW = pt.winStreak;
 
+    const winType = settlement?.reason === "NUMBER"
+        ? "NUMBER WIN"
+        : settlement?.reason === "SIZE"
+            ? "SIZE WIN"
+            : bets.some(b => b.type === "NUMBER")
+                ? "NUMBER WIN"
+                : "SIZE WIN";
+
     await send(chatId,
 "╔══════════════════════════╗\n"+
 "║  ✅ WIN! 🎉              ║\n"+
 "╠══════════════════════════╣\n"+
-"║ Number : "+num+"\n"+
-"║ Result : "+actual+"\n"+
-"║ Profit : +₹"+profit.toFixed(2)+"\n"+
-"║ P&L    : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
-"║ Streak : "+pt.winStreak+" wins\n"+
-"║ Total  : "+pt.wins+"W/"+pt.losses+"L\n"+
-"║ Reset  : L1 | Watch 0/"+cfg.watchLoss+"\n"+
+"║ Winning : "+winType+"\n"+
+"║ Number  : "+num+"\n"+
+"║ Result  : "+actual+"\n"+
+"║ Profit  : "+(profit>=0?"+":"")+"₹"+profit.toFixed(2)+"\n"+
+"║ P&L     : "+(pt.pnl>=0?"+":"")+pt.pnl.toFixed(2)+"\n"+
+"║ Streak  : "+pt.winStreak+" wins\n"+
+"║ Total   : "+pt.wins+"W/"+pt.losses+"L\n"+
+"║ Reset   : L1 | Watch 0/"+cfg.watchLoss+"\n"+
 "╚══════════════════════════╝"
     );
     await sendSticker(chatId, WIN_STICKER);
@@ -2185,6 +2262,23 @@ async function send(chatId,text,opts={}){
     catch(e){if(e.message&&e.message.includes("parse entities")){try{const o={...opts};delete o.parse_mode;return await bot.sendMessage(chatId,text,o);}catch(e2){}}console.error("send:",e.message?.substr(0,60));}
 }
 
+// Telegram messages have a size limit; preserve every member's details by
+// sending a long owner report in readable chunks.
+async function sendLongText(chatId, text, opts = {}) {
+    const limit = 3900;
+    const value = String(text || "");
+    if (value.length <= limit) return send(chatId, value, opts);
+    let rest = value;
+    while (rest.length > limit) {
+        let cut = rest.lastIndexOf("\n------------------------\n", limit);
+        if (cut < 500) cut = rest.lastIndexOf("\n", limit);
+        if (cut < 1) cut = limit;
+        await send(chatId, rest.slice(0, cut), opts);
+        rest = rest.slice(cut).trimStart();
+    }
+    if (rest) await send(chatId, rest, opts);
+}
+
 // Shared logger used by autoLogin() and captcha-solver-free.js.
 // Signature: logBoth(chatId, message, isError)
 async function logBoth(chatId, message, isError = false) {
@@ -2403,25 +2497,8 @@ function addHandlers(){
             if(text==="🟢 Add User")     {ownerState={action:"adduser"};return send(OWNER_ID,"User ID:");}
             if(text==="🔴 Remove User")  {ownerState={action:"removeuser"};return send(OWNER_ID,"User ID?");}
             if(text==="🔐 Set Token")    {ownerState={action:"settoken"};return send(OWNER_ID,"Token paste:");}
-            if(text==="📊 All Status")    {
-                const ids = Object.keys(usersAccess);
-                if(ids.length === 0) return send(OWNER_ID, "No users found.");
-                let report = "📊 TEAM MEMBERS ALL STATUS 📊\n\n";
-                ids.forEach(uid => {
-                    initUser(uid);
-                    const pt = profitTrack[uid];
-                    const st = autobetState[uid];
-                    const pnlStr = (pt.pnl >= 0 ? "+" : "") + pt.pnl.toFixed(2);
-                    report += `👤 ID: ${uid}\n`;
-                    report += `💰 Total Bet: ₹${(pt.totalBetAmount || 0).toFixed(2)}\n`;
-                    report += `📈 Profit: ₹${pnlStr}\n`;
-                    report += `🎮 Level: L${st.level}\n`;
-                    report += `🧾 History: ${Object.entries(st.levelHistory || {}).map(([level, count]) => level + ":" + count).join(" | ") || "None"}\n`;
-                    report += `🏆 Wins by Level: ${st && autobetCfg[uid].mode === "COMBINED" ? "Size " + levelMapText(stats[uid].sizeLevelWins) + " | Number " + levelMapText(stats[uid].numberLevelWins) : levelMapText(stats[uid].levelWins)}\n`;
-                    report += `📊 Win/Loss: ${pt.wins}W / ${pt.losses}L\n`;
-                    report += `------------------------\n`;
-                });
-                return send(OWNER_ID, report);
+            if(text==="📊 All Status") {
+                return sendLongText(OWNER_ID, "📊 TEAM MEMBERS — COMPLETE FUND & LEVEL DETAILS 📊\n\n" + ownerMemberDetails());
             }
             if(text==="🚪 Owner Logout") {ownerLoggedIn=false;return send(OWNER_ID,"🔒 Out.",{reply_markup:userMenu(id)});}
         }
