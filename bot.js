@@ -416,22 +416,30 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 
         await page.setRequestInterception(true);
         page.on('request', (req) => {
-            const auth = req.headers()['authorization'] || req.headers()['Authorization'];
-            if (auth) {
-                const candidate = normalizeCapturedToken(auth);
-                if (candidate) {
-                    capturedToken = candidate;
-                    console.log(`[LOGIN] Token captured from ${new URL(req.url()).pathname}`);
-                }
-            }
-            req.continue().catch(() => {});
-        });
-        page.on('response', async (response) => {
             try {
-                const headers = response.headers();
-                const headerToken = normalizeCapturedToken(headers.authorization || headers['x-access-token']);
-                if (headerToken) capturedToken = headerToken;
-            } catch (_) {}
+                const url = req.url();
+                const headers = req.headers();
+                const authorization = headers.authorization || headers.Authorization;
+
+                // Only accept the token from the GetBalance request.
+                if (url.includes('/api/Lottery/GetBalance') && authorization) {
+                    const token = String(authorization)
+                        .replace(/^Bearer\\s+/i, '')
+                        .trim();
+
+                    if (token.length >= 20) {
+                        capturedToken = token;
+                        console.log(
+                            `[LOGIN] GetBalance token captured; length=${token.length}`
+                        );
+                    }
+                }
+            } catch (err) {
+                console.error('[LOGIN] GetBalance token capture error:', err.message);
+            } finally {
+                // Continue every intercepted request exactly once.
+                req.continue().catch(() => {});
+            }
         });
         
         // Navigate to login page
