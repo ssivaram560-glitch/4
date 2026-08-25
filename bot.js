@@ -418,30 +418,41 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
              return null;
          };
 
-        await page.setRequestInterception(true);
-        page.on('request', (req) => {
-            try {
-                const url = req.url();
-                // Only GetBalance's lowercase authorization header is accepted.
-                if (url.includes('GetBalance') && req.headers()['authorization']) {
-                    const token = req.headers()['authorization']
-                        .replace(/^Bearer\s+/i, '')
-                        .trim();
+        // Capture only the Request Headers -> Authorization value of GetBalance.
+        // CDP sees the same network request shown in Chrome DevTools.
+        const cdp = await page.target().createCDPSession();
+        await cdp.send('Network.enable');
 
-                    if (token.length >= 20 && !capturedToken) {
-                        capturedToken = token;
-                        resolveGetBalanceToken(token);
-                        console.log(
-                            `[LOGIN] GetBalance token captured; length=${token.length}`
-                        );
-                    }
+        cdp.on('Network.requestWillBeSent', ({ request }) => {
+            try {
+                if (!/GetBalance/i.test(request.url)) return;
+
+                const headers = request.headers || {};
+                const authorization =
+                    headers.Authorization || headers.authorization;
+
+                if (!authorization || capturedToken) return;
+
+                const token = String(authorization)
+                    .replace(/^Bearer\s+/i, '')
+                    .trim();
+
+                if (token.length >= 20) {
+                    capturedToken = token;
+                    resolveGetBalanceToken(token);
+                    console.log(
+                        `[LOGIN] GetBalance Request Authorization captured; length=${token.length}`
+                    );
                 }
             } catch (err) {
-                console.error('[LOGIN] GetBalance token capture error:', err.message);
-            } finally {
-                // Continue every intercepted request exactly once.
-                req.continue().catch(() => {});
+                console.error('[LOGIN] GetBalance capture error:', err.message);
             }
+        });
+
+        // Request interception is only used to allow requests to continue.
+        await page.setRequestInterception(true);
+        page.on('request', (req) => {
+            req.continue().catch(() => {});
         });
         
         // Navigate to login page
