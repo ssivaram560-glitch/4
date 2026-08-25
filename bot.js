@@ -1244,42 +1244,54 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 },
                 timeout: 10000
             });
-  const d = r.data;
-            console.log(`[BET RESP] code:${d.code} msg:${d.msg}`);
+            const d = r.data || {};
+            const apiMessage = String(d.msg ?? d.message ?? d.msgCode ?? "");
+            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
 
-            // Token check from response headers/body
-            const newTokenFromResponseHeader = r.headers['authorization'] || r.headers['x-auth-token'];
-            if (newTokenFromResponseHeader) {
-                const cleanNewToken = newTokenFromResponseHeader.replace(/^Bearer\s+/i, "");
-                if (cleanNewToken !== token) {
-                    userTokens[userId] = cleanNewToken;
-                    token = cleanNewToken; // update local variable too
-                    console.log("[TOKEN UPDATE] New token captured from bet response headers!");
-                }
-            }
-
-            if (d.data && d.data.token && d.data.token !== token) {
-                 userTokens[userId] = d.data.token;
-                 token = d.data.token;
-                 console.log("[TOKEN UPDATE] New token captured from bet response body!");
-            }
+            // A bet response may rotate the token. Accept it only after bet success.
+            // If no valid token is returned, keep the current token unchanged.
+            const responseToken = normalizeToken(
+                r.headers['authorization'] ||
+                r.headers['x-auth-token'] ||
+                d.data?.token ||
+                d.token
+            );
 
             // Success case
+            if (d.code === 0 || d.msg === "Succeed" || d.msgCode === 0) {
+                if (responseToken && responseToken.length >= 20) {
+                    const updated = saveUserToken(userId, responseToken);
+                    if (updated) {
+                        token = responseToken;
+                        console.log("[TOKEN UPDATE] Valid token saved after successful bet.");
+                    } else {
+                        console.warn("[TOKEN UPDATE] Token cache failed; existing token kept.");
+                    }
+                }
+                return { ok: true, amt: betMult, bc };
+            }
             if (d.code === 0 || d.msg === "Succeed" || d.msgCode === 0) {
                 return { ok: true, amt: betMult, bc };
             }
 
             // Token Expiry Handling -> AUTOMATIC RELOGIN
             if (d.code === 401 || d.code === 40100 || d.status === 401 || isTokenExpiredMessage(apiMessage)) {
-                console.log("[AUTO RELOGIN] Token expired during bet. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
+                console.log("[AUTO RELOGIN] Token expired during bet. Keeping old token until relogin succeeds...");
+                const oldToken = getToken(userId);
                 const freshToken = await autoLogin(userId, chatId, true);
                 if (freshToken) {
-                    token = normalizeToken(freshToken) || getToken(userId); // Get fresh token
-                    console.log("[AUTO RELOGIN] Success! Retrying the bet with new token...");
-                    continue; // Retry the loop with new token
+                    const verifiedFreshToken = getToken(userId);
+                    if (verifiedFreshToken) {
+                        token = verifiedFreshToken;
+                        console.log("[AUTO RELOGIN] Success! Verified new token; retrying the bet...");
+                        continue;
+                    }
+                    token = oldToken;
+                    await send(chatId, "❌ Relogin completed but no new verified token was received.");
+                    return false;
                 } else {
-                    await send(chatId, "❌ Auto-login failed during token expiry.");
+                    token = oldToken;
+                    await send(chatId, "❌ Auto-login failed. Existing token was kept.");
                     return false;
                 }
             }
@@ -1304,14 +1316,21 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             // Handle Axios 401 / Token errors inside catch block
             const responseMessage = err.response?.data?.msg || err.response?.data?.message || '';
             if (err.response && (err.response.status === 401 || isTokenExpiredMessage(responseMessage))) {
-                console.log("[AUTO RELOGIN] Token error caught via exception. Clearing old token and trying autoLogin...");
-                clearUserToken(userId);
+                console.log("[AUTO RELOGIN] Token error caught via exception. Keeping old token until relogin succeeds...");
+                const oldToken = token;
                 const loginSuccess = await autoLogin(userId, chatId, true);
                 if (loginSuccess) {
-                    token = getToken(userId);
-                    continue; // Retry after relogin
+                    const verifiedFreshToken = getToken(userId);
+                    if (verifiedFreshToken) {
+                        token = verifiedFreshToken;
+                        continue; // Retry after verified relogin
+                    }
+                    token = oldToken;
+                    await send(chatId, "❌ Relogin completed but no new verified token was received.");
+                    return false;
                 } else {
-                    await send(chatId, "❌ Auto-login failed during token error.");
+                    token = oldToken;
+                    await send(chatId, "❌ Auto-login failed. Existing token was kept.");
                     return false;
                 }
             }
@@ -1319,7 +1338,6 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             // For general network errors, retry if attempts left
             if (i < maxRetries - 1) {
                 console.log(`[BET RETRY] Network error. Retrying in ${retryDelayMs / 1000}s... (Attempt ${i + 1}/${maxRetries})`);
-                await new_Promise_delay(retryDelayMs); // or setTimeout
                 await new Promise(resolve => setTimeout(resolve, retryDelayMs));
                 continue;
             }
