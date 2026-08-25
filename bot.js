@@ -574,9 +574,10 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 // ============================================================
 // Keep secrets outside the source code.
 const BOT_TOKEN    = process.env.BOT_TOKEN || "8871633438:AAEX-aqEKqXK50Qh7O0SnNq45C3aSatKBAA";
-const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
-const ADMIN_HANDLE = "@Sivakutty1";
+const OWNER_ID     = 1865939951;
+const OWNER_IDS    = [OWNER_ID, 8869874751];
+const ADMIN_HANDLE = "@lucifer1570";
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
