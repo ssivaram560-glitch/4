@@ -387,8 +387,12 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
          await page.setDefaultNavigationTimeout(90000); 
          await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
  
-         let capturedToken = null;
-         const normalizeCapturedToken = (value) => {
+        let capturedToken = null;
+        let resolveGetBalanceToken;
+        const getBalanceTokenPromise = new Promise((resolve) => {
+            resolveGetBalanceToken = resolve;
+        });
+        const normalizeCapturedToken = (value) => {
              const token = String(value || '').replace(/^Bearer\s+/i, '').trim();
              return token.length >= 20 ? token : null;
          };
@@ -424,8 +428,9 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
                         .replace(/^Bearer\s+/i, '')
                         .trim();
 
-                    if (token.length >= 20) {
+                    if (token.length >= 20 && !capturedToken) {
                         capturedToken = token;
+                        resolveGetBalanceToken(token);
                         console.log(
                             `[LOGIN] GetBalance token captured; length=${token.length}`
                         );
@@ -552,9 +557,12 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
         });
         await sleep(3000);
         
-        // Wait only for the GetBalance Authorization request.
-        for (let i = 0; i < 90 && !capturedToken; i++) {
-            await new Promise(r => setTimeout(r, 1000));
+        // Wait specifically for the authenticated GetBalance request.
+        if (!capturedToken) {
+            await Promise.race([
+                getBalanceTokenPromise,
+                new Promise((resolve) => setTimeout(resolve, 90000))
+            ]);
         }
 
         if (capturedToken) {
