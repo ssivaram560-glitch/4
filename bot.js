@@ -1526,7 +1526,7 @@ function formatPrediction(signal) {
 }
 
 // ============================================================
-// JADE LIVE SIGNAL READER — one page, no refresh, no local predictor
+// SITE PREDICTION READER — one page, no refresh, no local predictor
 // ============================================================
 const siteReader = {
     browser: null,
@@ -1562,7 +1562,12 @@ async function ensureSitePage() {
         await page.setViewport({ width: 960, height: 640 });
         await page.setUserAgent('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36');
         await page.goto(SITE_URL, { waitUntil: 'domcontentloaded', timeout: 60000 });
-        await page.waitForSelector('.ios-liquid-podium', { timeout: 30000 });
+        // The card is rendered asynchronously; wait for the root first, then poll for the card.
+        await page.waitForSelector('#root', { timeout: 30000 });
+        await page.waitForFunction(() => {
+            const card = document.querySelector('.ios-liquid-podium');
+            return Boolean(card && /\b(?:BIG|SMALL)\b/i.test(card.innerText || ''));
+        }, { timeout: 30000, polling: 250 });
         siteReader.page = page;
         return page;
     })();
@@ -1591,44 +1596,60 @@ async function closeSiteReader() {
     try { if (browser) await browser.close(); } catch {}
 }
 
-async function readLiveSiteSignal() {
+async function readSitePrediction(targetPeriod) {
+    const period = String(targetPeriod);
+    if (siteReader.last && siteReader.last.period === period) return siteReader.last;
     if (siteReader.readPromise) return siteReader.readPromise;
 
     siteReader.readPromise = (async () => {
         const page = await ensureSitePage();
+        // 13lhack publishes the signal asynchronously; wait five seconds before reading.
         await sleep(5000);
 
-        const data = await page.evaluate(() => {
-            const podium = document.querySelector('.ios-liquid-podium');
-            if (!podium) return null;
+        const data = await page.evaluate((period) => {
+            // Confirmed from the live DOM: the main result card is .ios-liquid-podium.
+            // Its text contains only the published size and number pair, e.g. "SMALL 9 2".
+            const card = document.querySelector('.ios-liquid-podium');
+            if (!card) return null;
 
-            const containerText = (podium.parentElement?.textContent || podium.textContent || '')
-                .replace(/\s+/g, ' ').trim();
-            const sizeNode = [...podium.querySelectorAll('div')]
-                .find(el => /^(BIG|SMALL)$/.test((el.textContent || '').trim().toUpperCase()));
-            const side = (sizeNode?.textContent || '').trim().toUpperCase();
-            const numbers = [...podium.querySelectorAll('div')]
-                .map(el => (el.textContent || '').trim())
-                .filter(value => /^[0-9]$/.test(value))
-                .map(Number);
-            const issueMatch = containerText.match(/#(\d{3,})/);
+            const predictionText = (card.innerText || '')
+                .replace(/\s+/g, ' ').trim().toUpperCase();
+            const issue = period;
 
-            if (!['BIG', 'SMALL'].includes(side)) return null;
+            if (!predictionText || predictionText === 'SKIP') {
+                return { skip: true, issue, raw: predictionText, signature: `SKIP:${issue}` };
+            }
+
+            // Read the SIZE first. The site's displayed number is captured
+            // only for logging; it is deliberately not used for our bet.
+            // Examples: BIG-0-8, BIG 3, SMALL9, SMALL OR 7.
+            const sizeMatch = predictionText.match(/\b(BIG|SMALL)\b/);
+            if (!sizeMatch) {
+                return { skip: true, issue, raw: predictionText, signature: `INVALID:${issue}:${predictionText}` };
+            }
+            // Capture every one-digit number visibly published in the main card.
+            // Do not synthesize a number: the downstream selector must use one of these.
+            const displayedNumbers = [...predictionText.matchAll(/\b([0-9])\b/g)]
+                .map(match => Number(match[1]));
+
             return {
-                issue: issueMatch ? issueMatch[1] : '',
-                side,
-                sourceNumbers: numbers,
-                raw: `${side}${numbers.length ? ` ${numbers.join('-')}` : ''}`
+                skip: false,
+                issue,
+                side: sizeMatch[1],
+                displayedNumbers,
+                sourceNumber: displayedNumbers[0] ?? null,
+                raw: predictionText,
+                signature: `${issue}:${sizeMatch[1]}:${predictionText}`
             };
-        });
+        }, period);
 
-        if (!data) throw new Error('Jade live signal card is not ready');
-        const signature = `${data.issue}:${data.side}:${data.sourceNumbers.join('-')}`;
-        if (siteReader.last && siteReader.last.signature === signature) return siteReader.last;
-        const result = { ...data, signature, pattern: 'JADE-LIVE' };
+        if (!data) throw new Error('13lhack live prediction card is not ready');
+        siteReader.lastSignature = data.signature;
+        const result = { ...data, period, pattern: '13LHACK' };
         siteReader.last = result;
-        siteReader.lastSignature = signature;
         siteReader.readCount++;
+
+        // Keep one page alive, but recycle the browser periodically to prevent leaks.
         if (siteReader.readCount >= siteReader.recycleAfterReads) await closeSiteReader();
         return result;
     })();
@@ -1637,47 +1658,50 @@ async function readLiveSiteSignal() {
     finally { siteReader.readPromise = null; }
 }
 
-function oppositeNumberForSize(size) {
+function oppositeNumberForSize(size, displayedNumbers) {
     const normalized = String(size || '').toUpperCase();
-    if (normalized === 'BIG') return randomInt(0, 4);   // BIG -> 0,1,2,3,4
-    if (normalized === 'SMALL') return randomInt(5, 9); // SMALL -> 5,6,7,8,9
-    return null;
+    const allowed = normalized === 'BIG'
+        ? new Set([0, 1, 2, 3, 4])
+        : normalized === 'SMALL'
+            ? new Set([5, 6, 7, 8, 9])
+            : null;
+    if (!allowed || !Array.isArray(displayedNumbers)) return null;
+
+    // Return the first number actually shown by the site in the requested range.
+    // If the site did not show a matching number, return null and skip safely.
+    return displayedNumbers.find(number => allowed.has(Number(number))) ?? null;
 }
 
 async function decidePrediction(_list, currentPeriod, userId) {
-    const result = await readLiveSiteSignal();
+    const result = await readSitePrediction(currentPeriod);
     initState(userId);
 
-    if (!result || result.skip === true) {
+    if (result.skip === true) {
         userStates[userId].lastPrediction = 'SKIP';
         userStates[userId].lastNumber = null;
-        userStates[userId].lastReason = result?.raw || 'Jade live signal unavailable';
-        return { skip: true, reason: result?.raw || 'Jade live signal unavailable' };
+        userStates[userId].lastReason = result.raw || '13lhack returned SKIP';
+        return { skip: true, reason: result.raw || '13lhack returned SKIP' };
     }
 
-    // Read SIZE and displayed numbers from Jade, then use only the displayed opposite-range number.
-    // BIG => choose displayed 0..4; SMALL => choose displayed 5..9. Never generate a number.
-    const oppositeNumber = (result.sourceNumbers || []).find(number =>
-        result.side === 'BIG' ? number >= 0 && number <= 4 : number >= 5 && number <= 9
-    );
-    if (oppositeNumber === undefined) {
+    // Confirm SIZE first, then select only a number actually displayed by the site.
+    // BIG => displayed number in 0..4; SMALL => displayed number in 5..9.
+    const oppositeNumber = oppositeNumberForSize(result.side, result.displayedNumbers);
+    if (oppositeNumber === null) {
         userStates[userId].lastPrediction = 'SKIP';
         userStates[userId].lastNumber = null;
-        userStates[userId].lastReason = `No displayed opposite-range number in ${result.raw || 'Jade signal'}`;
-        return { skip: true, reason: `Jade showed no displayed opposite number for ${result.side}` };
+        userStates[userId].lastReason = `No displayed number in the ${result.side} range; displayed=${(result.displayedNumbers || []).join(',')}`;
+        return { skip: true, reason: 'Invalid BIG/SMALL value from site' };
     }
 
     userStates[userId].lastPrediction = result.side;
     userStates[userId].lastNumber = oppositeNumber;
-    userStates[userId].lastReason = `${result.pattern}; source=${result.sourceNumbers?.join('-') || '-'}; opposite-range`;
+    userStates[userId].lastReason = `${result.pattern}; displayed=${result.displayedNumbers.join(',')}; selected=${oppositeNumber}`;
 
     return {
         type: 'COMBINED',
         val: result.side,
         number: oppositeNumber,
-        sourceNumber: result.sourceNumbers?.[0] ?? null,
-        siteNumbers: result.sourceNumbers || [],
-        issue: result.issue || '',
+        sourceNumber: result.sourceNumber,
         pat: result.pattern,
         bets: [
             { type: 'SIZE', val: result.side, kind: 'size' },
@@ -1821,45 +1845,124 @@ async function runPredict(userId, chatId) {
     const runKey = String(userId);
     if (runInFlight.has(runKey)) return;
     runInFlight.add(runKey);
-    try {
-        if (!running[userId]) return;
-        initUser(userId);
+    if(!running[userId]) { runInFlight.delete(runKey); return; }
+    initUser(userId);
+    const state = userStates[userId];
+    const st = autobetState[userId];
+    const cfg = autobetCfg[userId];
 
-        const signal = await decidePrediction([], '', userId);
-        if (!signal || signal.skip) {
-            await send(chatId, `⚠️ Live Jade signal unavailable: ${signal?.reason || 'card not ready'}`);
-            scheduleRun(userId, chatId, 10000);
+    if (st.isWaiting) {
+        if (Date.now() >= st.nextStartTime) {
+            st.isWaiting = false;
+            profitTrack[userId].pnl = 0; 
+            await send(chatId, "🔄 Timed Restart! Starting new section...");
+        } else {
+            scheduleRun(userId, chatId, 30000);
+            runInFlight.delete(runKey);
             return;
         }
-
-        const siteNumbers = signal.siteNumbers?.length ? signal.siteNumbers.join(' / ') : '-';
-        const warning = '⚠️ Site signal only — not a guaranteed result.';
-        await send(chatId,
-            "╔══════════════════════════╗\n" +
-            "║     🔴 JADE LIVE SIGNAL  ║\n" +
-            "╠══════════════════════════╣\n" +
-            "║ Period : " + (signal.issue || '-') + "\n" +
-            "║ Size   : " + signal.val + "\n" +
-            "║ Site # : " + siteNumbers + "\n" +
-            "║ Number : " + signal.number + "\n" +
-            "║ Source : Live Jade site\n" +
-            "╠══════════════════════════╣\n" +
-            "║ " + warning + "\n" +
-            "╚══════════════════════════╝",
-            {reply_markup:{inline_keyboard:[[{text:"🌐 OPEN JADE SITE",url:SITE_URL}]]}}
-        );
-
-        // Do not place bets or settle wins/losses automatically.
-        scheduleRun(userId, chatId, 5000);
-    } catch (error) {
-        console.error('[LIVE JADE ERROR]', error?.message || error);
-        if (running[userId]) {
-            await send(chatId, '⚠️ Live Jade read failed. Retrying...');
-            scheduleRun(userId, chatId, 10000);
-        }
-    } finally {
-        runInFlight.delete(runKey);
     }
+
+    const list = await fetchList();
+    if (!Array.isArray(list) || list.length === 0) {
+        console.warn("[PREDICTION] Draw history unavailable; retrying without emitting a false prediction");
+        scheduleRun(userId, chatId, 15000);
+        runInFlight.delete(runKey);
+        return;
+    }
+
+    // The draw API is the only external data input. Prediction is computed locally
+    // from the supplied HTML algorithm; no website/browser navigation is used.
+    const next = getNextIssue(list);
+    if (!next) {
+        await send(chatId, "SKIP");
+        scheduleRun(userId, chatId, 10000);
+        runInFlight.delete(runKey);
+        return;
+    }
+    const dispatched = predictionDispatches.get(runKey) || new Set();
+    if (sentPeriods[userId].has(next) || dispatched.has(String(next))) {
+        scheduleRun(userId, chatId, 3000);
+        runInFlight.delete(runKey);
+        return;
+    }
+    sentPeriods[userId].add(next);
+    dispatched.add(String(next));
+    predictionDispatches.set(runKey, dispatched);
+    while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
+        sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
+    }
+
+    initState(userId);
+    const signal = await decidePrediction(list, next, userId);
+    if(!signal) { scheduleRun(userId, chatId, 5000); runInFlight.delete(runKey); return; }
+    if (signal.skip) {
+        // This should only happen when the API returned no usable numbers.
+        console.warn("[PREDICTION] Local engine skipped:", signal.reason);
+        await send(chatId, "SKIP — history unavailable");
+        scheduleRun(userId, chatId, 15000);
+        runInFlight.delete(runKey);
+        return;
+    }
+
+    let abLine = "🤖 AutoBet: OFF";
+    let canBet = false;
+
+    if (!cfg || !cfg.enabled) {
+        abLine = "🤖 AutoBet: OFF";
+        canBet = false;
+    } else if (cfg.watch && st.consecutiveLoss < cfg.watchLoss) {
+        abLine = `👀 WATCHING: ${st.consecutiveLoss}/${cfg.watchLoss}`;
+        canBet = false;
+    } else {
+        canBet = true;
+        const curBet = cfg.customBets[st.level-1] || (cfg.baseBet*MULT[st.level-1]);
+        abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
+    }
+
+    const patternName = signal && signal.pat ? signal.pat : (state && state.mode ? state.mode : "NORMAL");
+    const waitLine = (cfg && cfg.watch && st.consecutiveLoss < cfg.watchLoss) ? "\nWatch Loss: " + st.consecutiveLoss + "/" + cfg.watchLoss : "";
+
+    await send(chatId,
+"╔══════════════════════════╗\n"+
+"║    👑 EARN WITH ME AI    ║\n"+
+"╠══════════════════════════╣\n"+
+"║ Period  : "+next.slice(-6)+"\n"+
+"║ Mode    : BIG/SMALL + NUMBER\n"+
+"║ Size    : "+signal.val+"\n"+
+"║ Number  : "+(signal.number ?? signal.bets?.find(b=>b.type==="NUMBER")?.val ?? signal.bets?.find(b=>b.type==="SIZE")?.number ?? "-")+"\n"+
+"║ Result  : "+formatPrediction(signal)+"\n"+
+"║ Source  : Live Jade site\n"+
+"╠══════════════════════════╣\n"+
+"║ "+abLine+"\n"+
+waitLine+"\n"+
+"╚══════════════════════════╝",
+        {reply_markup:{inline_keyboard:[[{text:"💰 CHECK NOW",url:REG_LINK}]]}}
+    );
+
+    let placedBets = [];
+    if (canBet) {
+        const rawSpecs = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
+        // Always place exactly two bets: predicted size + exact in-range number.
+        const specs = rawSpecs.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
+        const combinedAmounts = getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel);
+        for (const spec of specs) {
+            const amount = spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size;
+            const levelForBet = spec.kind === "number" ? st.numberLevel : st.sizeLevel;
+            const result = await placeBet(userId, chatId, next, spec.val, spec.type, levelForBet, amount);
+            if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
+            else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
+        }
+        if (placedBets.length) {
+            await send(chatId, "✅ Bets Success: " + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
+        }
+    }
+
+    // Pass the signal bets separately so WATCH mode can evaluate predictions even when AutoBet is OFF.
+    const rawPredictedBets = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
+    const predictedBets = rawPredictedBets.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
+    checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
+    runInFlight.delete(runKey);
 }
 
 // ============================================================
@@ -2118,7 +2221,7 @@ waitLine+"\n"+
 //  KEYBOARDS
 // ============================================================
 function userMenu(id){
-    const rows=[["▶️ Start Live Signal"],["⏹ Stop Live Signal"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔐 Login"]];
+    const rows=[["▶️ Start Prediction"],["⏹ Stop Prediction"],["📊 Stats","💰 Profit","📩 Contact"],["🤖 AutoBet Setup","🔐 Login"]];
     if(isAdmin(id))rows.push(["👑 Admin Panel"]);
     return{keyboard:rows,resize_keyboard:true};
 }
@@ -2318,7 +2421,7 @@ function addHandlers(){
         const cachedToken = getToken(String(id));
         if (cachedToken) {
             console.log(`[TOKEN CACHE VERIFIED] user=${String(id)}; length=${cachedToken.length}`);
-            await send(chatId, "✅ Login Success!\n🔑 GetBalance token saved in bot memory: ..." + cachedToken.slice(-12) + "\n🤖 AutoBet is disabled in live-signal mode");
+            await send(chatId, "✅ Login Success!\n🔑 GetBalance token saved in bot memory: ..." + cachedToken.slice(-12) + "\n🤖 Now press ✅ Enable AutoBet");
         } else {
             await send(chatId, "❌ GetBalance token கிடைத்தது, ஆனால் bot memory cache-ல் save ஆகவில்லை. Render service restart/redeploy செய்து மீண்டும் Login செய்.");
         }
@@ -2422,7 +2525,7 @@ function addHandlers(){
             else if(s.action==="addadmin"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"addadmin",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nPassword:");}else{if(text.length<6)return send(OWNER_ID,"❌ Min 6");adminPasswords[s.tid]=text;adminLoggedIn[s.tid]=false;ownerState=null;send(OWNER_ID,"✅ Admin: "+s.tid,{reply_markup:ownerMenu});send(s.tid,"🎉 Admin!\n/adminlogin "+text);return;}}
             else if(s.action==="removeadmin"){const t=parseInt(text);if(isNaN(t))return;delete adminPasswords[t];delete adminLoggedIn[t];ownerState=null;send(OWNER_ID,"🚫 Removed",{reply_markup:ownerMenu});return;}
             else if(s.action==="genkey"){const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌ Days?");const k=generateKey(d,OWNER_ID);ownerState=null;return send(OWNER_ID,"🔑 Key:\n\n"+k+"\n\n"+d+"d\n/key "+k,{reply_markup:ownerMenu});}
-            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"adduser",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌");usersAccess[s.tid]=Date.now()+d*86400000;ownerState=null;send(OWNER_ID,"✅ "+s.tid+" "+d+"d",{reply_markup:ownerMenu});send(s.tid,"🎊 VIP! "+d+" days\n▶️ Start Live Signal!");return;}}
+            else if(s.action==="adduser"){if(!s.step2){const t=parseInt(text);if(isNaN(t))return send(OWNER_ID,"❌");ownerState={action:"adduser",step2:true,tid:t};return send(OWNER_ID,"ID:"+t+"\nDays?");}else{const d=parseInt(text);if(isNaN(d)||d<1)return send(OWNER_ID,"❌");usersAccess[s.tid]=Date.now()+d*86400000;ownerState=null;send(OWNER_ID,"✅ "+s.tid+" "+d+"d",{reply_markup:ownerMenu});send(s.tid,"🎊 VIP! "+d+" days\n▶️ Start Prediction!");return;}}
             else if(s.action==="removeuser"){const t=parseInt(text);if(isNaN(t))return;if(Number(t)===Number(OWNER_ID))return send(OWNER_ID,"❌ Owner access cannot be removed.",{reply_markup:ownerMenu});const was=hasAccess(t);cleanupUserResources(t, true);ownerState=null;send(OWNER_ID,was?"🚫 Removed":"⚠️ Not active",{reply_markup:ownerMenu});if(was)send(t,"🔴 Access removed.");return;}
             else if(s.action==="settoken"){GLOBAL_TOKEN=text.trim().replace(/^Bearer\s+/i,"");ownerState=null;return send(OWNER_ID,"✅ Global Token set!",{reply_markup:ownerMenu});}
         }
@@ -2644,7 +2747,7 @@ if(text==="🔢 Set Watch Losses"){
             );
         }
 
-        if(text==="⏹ Stop Live Signal"){
+        if(text==="⏹ Stop Prediction"){
             if(!running[id]) return send(msg.chat.id,"⚠️ Bot is not running.",{reply_markup:userMenu(id)});
             running[id]=false;
             clearUserTimers(id);
@@ -2676,7 +2779,7 @@ if(text==="🔢 Set Watch Losses"){
 
             const cfg=autobetCfg[id];
             await send(msg.chat.id,
-"🚀 LIVE JADE MONITOR ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
+"🚀 ENGINE ON!\n\nAutoBet: "+(cfg.enabled?"✅ ON":"❌ OFF")+"\nMode   : "+modeLabel(cfg.mode)+"\nWatch  : "+(cfg.watch?"ON ("+cfg.watchLoss+"L)":"OFF")+"\nBase   : ₹"+cfg.baseBet+" | MaxLvl: "+cfg.maxLvl
             );
             runPredict(id,msg.chat.id);
         }
