@@ -574,9 +574,9 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 // ============================================================
 // Keep secrets outside the source code.
 const BOT_TOKEN    = process.env.BOT_TOKEN || "8871633438:AAEX-aqEKqXK50Qh7O0SnNq45C3aSatKBAA";
+const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
-const OWNER_ID     = 1865939951;
-const ADMIN_HANDLE = "@lucifer1570";
+const ADMIN_HANDLE = "@Sivakutty1";
 const REG_LINK     = "https://bdgwinuu.com/#/register?invitationCode=7442815992780";
 const WIN_STICKER  = "CAACAgUAAxkBAAFHUGNp4JX1-ohP4uBEWpfNptaz-HmwVgAC4hgAAhboKVbObuGuTcMs2zsE";
 const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YVYiydObSa0O8zsE";
@@ -584,7 +584,7 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://13llottery.com/api/Home/Login";
 const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
 const SITE_URL    = "https://v0-happyai5l.vercel.app/";
 const CHROME_ARGS = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
@@ -1254,16 +1254,9 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
         return false;
     }
 
-    const cfg = autobetCfg[userId] || {};
-    // Resolve the fallback from the actual bet type.  Using customBets for every
-    // type was the source of SIZE/NUMBER level drift when no override was passed.
-    const sequence = predType === "SIZE"
-        ? cfg.customSizeBets
-        : predType === "NUMBER"
-            ? cfg.customNumberBets
-            : cfg.customBets;
-    const fallbackAmount = Number(sequence?.[level - 1]) || (Number(cfg.baseBet) || 1) * (MULT[level - 1] || 1);
-    const betMult = Number.isFinite(Number(amountOverride)) ? Number(amountOverride) : fallbackAmount;
+    const cfg        = autobetCfg[userId];
+    const fallbackAmount = cfg.customBets[level-1] || (cfg.baseBet * MULT[level-1]);
+    const betMult   = Number.isFinite(Number(amountOverride)) ? Number(amountOverride) : fallbackAmount;
     let bc = "";
 
     const maxRetries = 5; 
@@ -1458,16 +1451,7 @@ function modeLabel(mode) {
 
 function getSequenceAmount(userId, level, kind = "default") {
     const cfg = autobetCfg[userId] || {};
-    // One authoritative sequence per bet side prevents level/amount drift.
-    const seq = kind === "number"
-        ? cfg.customNumberBets
-        : kind === "size"
-            ? cfg.customSizeBets
-            : cfg.mode === "NUMBER"
-                ? cfg.customNumberBets
-                : cfg.mode === "SIZE"
-                    ? cfg.customSizeBets
-                    : cfg.customBets;
+    const seq = cfg.mode === "COMBINED" ? (kind === "number" ? cfg.customNumberBets : cfg.customSizeBets) : cfg.customBets;
     return Number(seq?.[level - 1] ?? (cfg.baseBet * (MULT[level - 1] || 1)));
 }
 
@@ -1672,66 +1656,7 @@ function oppositeNumberForSize(size) {
     return null;
 }
 
-// Big/Small mode only:
-// DRAW_URL returns newest first. Therefore list[1] is the first/older
-// combination and list[0] is the second/newer combination.
-function predictSizeFromTwoDraws(list) {
-    if (!Array.isArray(list) || list.length < 2) return null;
-
-    const first = parseItem(list[1]);
-    const second = parseItem(list[0]);
-    if (![first, second].every(item => Number.isInteger(item.n) && item.n >= 0 && item.n <= 9)) {
-        return null;
-    }
-
-    const key = `${first.color}-${first.size}|${second.color}-${second.size}`;
-    const mapping = {
-        'RED-BIG|RED-BIG': 'SMALL',
-        'RED-BIG|RED-SMALL': 'SMALL',
-        'RED-SMALL|RED-BIG': 'BIG',
-        'RED-SMALL|RED-SMALL': 'BIG',
-        'RED-BIG|GREEN-BIG': 'SMALL',
-        'RED-BIG|GREEN-SMALL': 'SMALL',
-        'RED-SMALL|GREEN-BIG': 'BIG',
-        'RED-SMALL|GREEN-SMALL': 'SMALL',
-        'GREEN-BIG|GREEN-BIG': 'SMALL',
-        'GREEN-BIG|GREEN-SMALL': 'BIG',
-        'GREEN-SMALL|GREEN-BIG': 'SMALL',
-        'GREEN-SMALL|GREEN-SMALL': 'BIG',
-        'GREEN-BIG|RED-BIG': 'BIG',
-        'GREEN-BIG|RED-SMALL': 'BIG',
-        'GREEN-SMALL|RED-BIG': 'SMALL',
-        'GREEN-SMALL|RED-SMALL': 'BIG'
-    };
-
-    return mapping[key] || null;
-}
-
 async function decidePrediction(_list, currentPeriod, userId) {
-    initUser(userId);
-
-    // Change applies only to Big/Small (SIZE) mode.
-    // NUMBER and COMBINED modes continue through the existing site path.
-    if (autobetCfg[userId]?.mode === 'SIZE') {
-        const predictedSize = predictSizeFromTwoDraws(_list);
-        if (!predictedSize) {
-            userStates[userId].lastPrediction = 'SKIP';
-            userStates[userId].lastNumber = null;
-            userStates[userId].lastReason = 'Two-draw 16-combination rule could not be evaluated';
-            return { skip: true, reason: 'Need two valid previous draws' };
-        }
-
-        userStates[userId].lastPrediction = predictedSize;
-        userStates[userId].lastNumber = null;
-        userStates[userId].lastReason = '16-combination color + size rule';
-
-        return {
-            type: 'SIZE',
-            val: predictedSize,
-            pat: '16-COMBINATION'
-        };
-    }
-
     const result = await readSitePrediction(currentPeriod);
     initState(userId);
 
@@ -1858,9 +1783,7 @@ async function handleLoss(userId, chatId, actual, num, betLevel, bets = [], sett
     if(pt.lossStreak > pt.maxL) pt.maxL = pt.lossStreak;
 
     if(betLevel < cfg.maxLvl){
-        const next = cfg.mode === "COMBINED"
-            ? `Size ₹${getSequenceAmount(userId, st.sizeLevel, "size")} / Number ₹${getSequenceAmount(userId, st.numberLevel, "number")}`
-            : getSequenceAmount(userId, st.level, cfg.mode === "NUMBER" ? "number" : "size");
+        const next = cfg.mode === "COMBINED" ? `Size ₹${getSequenceAmount(userId, st.sizeLevel, "size")} / Number ₹${getSequenceAmount(userId, st.numberLevel, "number")}` : (cfg.customBets[st.level-1] || (cfg.baseBet * MULT[st.level-1]));
         await send(chatId,
 "╔══════════════════════════╗\n"+
 "║  ❌ LOSS                 ║\n"+
@@ -1977,11 +1900,8 @@ async function runPredict(userId, chatId) {
         canBet = false;
     } else {
         canBet = true;
-        const displayLevel = cfg.mode === "COMBINED" ? Math.max(st.sizeLevel, st.numberLevel) : st.level;
-        const curBet = cfg.mode === "COMBINED"
-            ? `Size ₹${getSequenceAmount(userId, st.sizeLevel, "size")} / Number ₹${getSequenceAmount(userId, st.numberLevel, "number")}`
-            : getSequenceAmount(userId, displayLevel, cfg.mode === "NUMBER" ? "number" : "size");
-        abLine = (displayLevel > 1 ? "📈 MART " : "💰 BET ")+"L"+displayLevel+": "+(typeof curBet === "number" ? "₹"+curBet : curBet);
+        const curBet = cfg.customBets[st.level-1] || (cfg.baseBet*MULT[st.level-1]);
+        abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
     }
 
     const patternName = signal && signal.pat ? signal.pat : (state && state.mode ? state.mode : "NORMAL");
@@ -2014,11 +1934,7 @@ waitLine+"\n"+
             const amount = spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size;
             const levelForBet = spec.kind === "number" ? st.numberLevel : st.sizeLevel;
             const result = await placeBet(userId, chatId, next, spec.val, spec.type, levelForBet, amount);
-            if (result && result.ok) {
-                // Preserve the exact level used for this request.  Settlement must
-                // never read a possibly-updated global level later.
-                placedBets.push({ ...spec, amt: result.amt, level: levelForBet });
-            }
+            if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
             else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
         }
         if (placedBets.length) {
@@ -2115,11 +2031,9 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         const win = settlement ? settlement.won : evaluationBets.some(b => b.type === "NUMBER"
             ? Number(b.val) === num
             : b.type === "SIZE" && b.val === actualSize);
-        // Capture levels from the bets actually placed, not from mutable state.
-        // This keeps level history and the next stake aligned in all three modes.
-        const betLevel = bets[0]?.level || st.level;
-        const sizeBetLevel = bets.find(b => b.type === "SIZE")?.level || st.sizeLevel;
-        const numberBetLevel = bets.find(b => b.type === "NUMBER")?.level || st.numberLevel;
+        const betLevel = st.level;
+        const sizeBetLevel = st.sizeLevel;
+        const numberBetLevel = st.numberLevel;
         if (betPlaced) {
             const key = "L" + betLevel;
             st.levelHistory[key] = (st.levelHistory[key] || 0) + 1;
@@ -2217,11 +2131,7 @@ async function profitReport(chatId,userId){
     initUser(userId);
     const pt=profitTrack[userId],cfg=autobetCfg[userId];
     const rate=pt.totalBets?((pt.wins/pt.totalBets)*100).toFixed(1):"0.0";
-    const amounts = cfg.mode === "COMBINED"
-        ? cfg.customSizeBets.slice(0, cfg.maxLvl)
-        : cfg.mode === "NUMBER"
-            ? cfg.customNumberBets.slice(0, cfg.maxLvl)
-            : cfg.customBets.slice(0, cfg.maxLvl);
+    const amounts=cfg.customBets.slice(0,cfg.maxLvl);
     let balance = "❌ No token";
     const balResult = await getLiveBalance(userId);
     if(balResult.success){
@@ -2241,11 +2151,7 @@ async function profitReport(chatId,userId){
 async function autobetStatus(chatId, userId) {
     initUser(userId);
     const cfg = autobetCfg[userId], st = autobetState[userId], pt = profitTrack[userId];
-    const amounts = cfg.mode === "COMBINED"
-        ? cfg.customSizeBets.slice(0, cfg.maxLvl)
-        : cfg.mode === "NUMBER"
-            ? cfg.customNumberBets.slice(0, cfg.maxLvl)
-            : cfg.customBets.slice(0, cfg.maxLvl);
+    const amounts = cfg.mode === "COMBINED" ? cfg.customSizeBets.slice(0, cfg.maxLvl) : cfg.customBets.slice(0, cfg.maxLvl);
     const creds = userCreds[userId] || {};
 
     let liveBal = "❌ No token";
@@ -2685,11 +2591,7 @@ function addHandlers(){
         if(text==="🤖 AutoBet Setup"){
             if(!hasAccess(id))return send(id,"❌ No access.");
             const cfg=autobetCfg[id],creds=userCreds[id]||{};
-            const amounts = cfg.mode === "COMBINED"
-                ? cfg.customSizeBets.slice(0, cfg.maxLvl)
-                : cfg.mode === "NUMBER"
-                    ? cfg.customNumberBets.slice(0, cfg.maxLvl)
-                    : cfg.customBets.slice(0, cfg.maxLvl);
+            const amounts=cfg.customBets.slice(0,cfg.maxLvl);
             const targetProfit = Number(cfg.targetProfit) || 1000;
             return send(id,
 "🤖 AUTOBET SETTINGS\n\n"+
@@ -2725,19 +2627,16 @@ function addHandlers(){
         if(text==="🎮 Mode: Big/Small"){
             delete userAction[id];
             autobetCfg[id].mode="SIZE";
-            autobetState[id].level = autobetState[id].sizeLevel || 1;
             return send(id,"✅ Mode set: BIG/SMALL\nCategory bet enabled.",{reply_markup:autobetMenu});
         }
         if(text==="🔢 Mode: Number"){
             delete userAction[id];
             autobetCfg[id].mode="NUMBER";
-            autobetState[id].level = autobetState[id].numberLevel || 1;
             return send(id,"✅ Mode set: NUMBER\nExact Num_5 bet enabled.",{reply_markup:autobetMenu});
         }
         if(text==="🔀 Mode: BigSmall+Number"){
             delete userAction[id];
             autobetCfg[id].mode="COMBINED";
-            autobetState[id].level = Math.max(autobetState[id].sizeLevel || 1, autobetState[id].numberLevel || 1);
             return send(id,"✅ Mode set: BIG/SMALL + NUMBER\nOne site size bet + one site number bet.",{reply_markup:autobetMenu});
         }
         if(text==="💰 Set Base Bet"){userAction[id]={action:"setbase"};return send(id,"Enter base bet amount (e.g. 1):");}
