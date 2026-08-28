@@ -1457,42 +1457,52 @@ function getSequenceAmount(userId, level, kind = "default") {
 
 function getCombinedBetAmounts(userId, sizeLevel, numberLevel) {
     const cfg = autobetCfg[userId] || {};
+    const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
+    const safeSizeLevel = Math.min(maxLevel, Math.max(1, Number(sizeLevel) || 1));
+    const safeNumberLevel = Math.min(maxLevel, Math.max(1, Number(numberLevel) || 1));
     const base = Math.max(1, Number(cfg.baseBet) || 1);
-    const sizeAmount = Number(cfg.customSizeBets?.[sizeLevel - 1] ?? base);
-    const numberAmount = Number(cfg.customNumberBets?.[numberLevel - 1] ?? base);
+    const sizeAmount = Number(cfg.customSizeBets?.[safeSizeLevel - 1]);
+    const numberAmount = Number(cfg.customNumberBets?.[safeNumberLevel - 1]);
     return {
         size: Number.isFinite(sizeAmount) && sizeAmount > 0 ? sizeAmount : base,
-        number: Number.isFinite(numberAmount) && numberAmount > 0 ? numberAmount : base
+        number: Number.isFinite(numberAmount) && numberAmount > 0 ? numberAmount : base,
+        sizeLevel: safeSizeLevel,
+        numberLevel: safeNumberLevel
     };
 }
 
 function combinedSettlement(bets, actualSize, actualNumber) {
-    const sizeAmount = bets.filter(b => b.type === "SIZE").reduce((n, b) => n + Number(b.amt || 0), 0);
-    const numberBets = bets.filter(b => b.type === "NUMBER");
-    const numberAmount = numberBets.reduce((n, b) => n + Number(b.amt || 0), 0);
-    const total = sizeAmount + numberAmount;
-    const sizeWon = bets.some(b => b.type === "SIZE" && b.val === actualSize);
-    const numberWon = numberBets.some(b => Number(b.val) === Number(actualNumber));
-    // A combined bet has separate stakes. P&L is net profit:
-    // payout from the winning side minus every losing stake.
+    // Combined mode always has at most one SIZE and one NUMBER stake.
+    const normalized = Array.isArray(bets) ? bets : [];
+    const sizeBet = normalized.find(b => b.type === "SIZE");
+    const numberBet = normalized.find(b => b.type === "NUMBER");
+    const sizeAmount = sizeBet ? Math.max(0, Number(sizeBet.amt) || 0) : 0;
+    const numberAmount = numberBet ? Math.max(0, Number(numberBet.amt) || 0) : 0;
+    const totalStake = sizeAmount + numberAmount;
+    const sizeWon = !!sizeBet && String(sizeBet.val).toUpperCase() === String(actualSize).toUpperCase();
+    const numberWon = !!numberBet && Number(numberBet.val) === Number(actualNumber);
+
+    // The API multipliers are treated as total returned winnings. Net profit
+    // must subtract the complete stake, including the NUMBER stake.
     if (sizeWon) {
         return {
             won: true,
-            pnl: (sizeAmount * SIZE_WIN_MULTIPLIER) - numberAmount,
-            reason: "SIZE"
+            pnl: (sizeAmount * SIZE_WIN_MULTIPLIER) - totalStake,
+            reason: "SIZE",
+            totalStake,
+            payout: sizeAmount * SIZE_WIN_MULTIPLIER
         };
     }
     if (numberWon) {
-        const winning = numberBets
-            .filter(b => Number(b.val) === Number(actualNumber))
-            .reduce((n, b) => n + Number(b.amt || 0), 0);
         return {
             won: true,
-            pnl: (winning * NUMBER_WIN_MULTIPLIER) - (total - winning),
-            reason: "NUMBER"
+            pnl: (numberAmount * NUMBER_WIN_MULTIPLIER) - totalStake,
+            reason: "NUMBER",
+            totalStake,
+            payout: numberAmount * NUMBER_WIN_MULTIPLIER
         };
     }
-    return { won: false, pnl: -total, reason: "NONE" };
+    return { won: false, pnl: -totalStake, reason: "NONE", totalStake, payout: 0 };
 }
 
 function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
@@ -1661,9 +1671,9 @@ async function readSitePrediction(targetPeriod) {
 function oppositeNumberForSize(size, displayedNumbers) {
     const normalized = String(size || '').toUpperCase();
     const allowed = normalized === 'BIG'
-        ? new Set([0, 1, 2, 3, 4])
+        ? new Set([5, 6, 7, 8, 9])
         : normalized === 'SMALL'
-            ? new Set([5, 6, 7, 8, 9])
+            ? new Set([0, 1, 2, 3, 4])
             : null;
     if (!allowed || !Array.isArray(displayedNumbers)) return null;
 
@@ -1684,7 +1694,7 @@ async function decidePrediction(_list, currentPeriod, userId) {
     }
 
     // Confirm SIZE first, then select only a number actually displayed by the site.
-    // BIG => displayed number in 0..4; SMALL => displayed number in 5..9.
+    // BIG => displayed number in 5..9; SMALL => displayed number in 0..4.
     const oppositeNumber = oppositeNumberForSize(result.side, result.displayedNumbers);
     if (oppositeNumber === null) {
         userStates[userId].lastPrediction = 'SKIP';
@@ -1750,8 +1760,8 @@ async function handleWin(userId, chatId, actual, num, betLevel, bets = [], settl
         const numberAmount = bets.filter(b => b.type === "NUMBER").reduce((sum, b) => sum + Number(b.amt || 0), 0);
         const sizeAmount = bets.filter(b => b.type === "SIZE").reduce((sum, b) => sum + Number(b.amt || 0), 0);
         profit = numberAmount > 0
-            ? numberAmount * NUMBER_WIN_MULTIPLIER - (amt - numberAmount)
-            : sizeAmount * SIZE_WIN_MULTIPLIER - (amt - sizeAmount);
+            ? numberAmount * NUMBER_WIN_MULTIPLIER - amt
+            : sizeAmount * SIZE_WIN_MULTIPLIER - amt;
     }
     
     pt.totalBets++; pt.wins++; pt.pnl += profit; 
@@ -1943,18 +1953,27 @@ waitLine+"\n"+
     let placedBets = [];
     if (canBet) {
         const rawSpecs = signal.bets || [{ type: signal.type, val: signal.val, kind: signal.type === "NUMBER" ? "number" : "size" }];
-        // Always place exactly two bets: predicted size + exact in-range number.
-        const specs = rawSpecs.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
+        // Enforce exactly one SIZE and one NUMBER for each period in COMBINED mode.
+        const sizeSpec = rawSpecs.find(spec => spec.type === "SIZE");
+        const numberSpec = rawSpecs.find(spec => spec.type === "NUMBER");
+        const specs = cfg.mode === "COMBINED"
+            ? [sizeSpec, numberSpec].filter(Boolean)
+            : rawSpecs.filter(spec => spec.type === "SIZE" || spec.type === "NUMBER");
         const combinedAmounts = getCombinedBetAmounts(userId, st.sizeLevel, st.numberLevel);
         for (const spec of specs) {
-            const amount = spec.kind === "number" ? combinedAmounts.number : combinedAmounts.size;
-            const levelForBet = spec.kind === "number" ? st.numberLevel : st.sizeLevel;
+            const isNumber = spec.type === "NUMBER";
+            const amount = isNumber ? combinedAmounts.number : combinedAmounts.size;
+            const levelForBet = isNumber ? combinedAmounts.numberLevel : combinedAmounts.sizeLevel;
             const result = await placeBet(userId, chatId, next, spec.val, spec.type, levelForBet, amount);
-            if (result && result.ok) placedBets.push({ ...spec, amt: result.amt });
+            if (result && result.ok) placedBets.push({ ...spec, amt: result.amt, level: levelForBet });
             else await send(chatId, "❌ Bet Failed (" + spec.type + "): " + (result?.msg || "Unknown error"));
         }
+        if (cfg.mode === "COMBINED" && placedBets.length !== 2) {
+            // Never treat a partial combined pair as a valid combined settlement.
+            await send(chatId, "⚠️ Combined bet incomplete for period " + next + ". Expected exactly 1 size + 1 number; settlement will use only the confirmed stake.");
+        }
         if (placedBets.length) {
-            await send(chatId, "✅ Bets Success: " + placedBets.length + " | L" + st.level + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
+            await send(chatId, "✅ Bets Success: " + placedBets.length + " | Size L" + combinedAmounts.sizeLevel + " / Number L" + combinedAmounts.numberLevel + "\n" + placedBets.map(b => b.type + "=" + b.val + " ₹" + b.amt).join("\n") + "\n⏳ Checking result...");
         }
     }
 
@@ -2147,7 +2166,9 @@ async function profitReport(chatId,userId){
     initUser(userId);
     const pt=profitTrack[userId],cfg=autobetCfg[userId];
     const rate=pt.totalBets?((pt.wins/pt.totalBets)*100).toFixed(1):"0.0";
-    const amounts=cfg.customBets.slice(0,cfg.maxLvl);
+    const amounts = cfg.mode === "COMBINED"
+        ? cfg.customSizeBets.slice(0, cfg.maxLvl).map((v, i) => `S₹${v}/N₹${cfg.customNumberBets[i] ?? cfg.baseBet}`)
+        : cfg.customBets.slice(0, cfg.maxLvl);
     let balance = "❌ No token";
     const balResult = await getLiveBalance(userId);
     if(balResult.success){
@@ -2167,7 +2188,9 @@ async function profitReport(chatId,userId){
 async function autobetStatus(chatId, userId) {
     initUser(userId);
     const cfg = autobetCfg[userId], st = autobetState[userId], pt = profitTrack[userId];
-    const amounts = cfg.mode === "COMBINED" ? cfg.customSizeBets.slice(0, cfg.maxLvl) : cfg.customBets.slice(0, cfg.maxLvl);
+    const amounts = cfg.mode === "COMBINED"
+        ? cfg.customSizeBets.slice(0, cfg.maxLvl).map((v, i) => `S₹${v}/N₹${cfg.customNumberBets[i] ?? cfg.baseBet}`)
+        : cfg.customBets.slice(0, cfg.maxLvl);
     const creds = userCreds[userId] || {};
 
     let liveBal = "❌ No token";
