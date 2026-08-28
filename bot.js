@@ -1630,8 +1630,8 @@ async function readSitePrediction(targetPeriod) {
                 return { skip: true, issue, raw: predictionText, signature: `SKIP:${issue}` };
             }
 
-            // Read the SIZE first. The site's displayed number is captured
-            // only for logging; it is deliberately not used for our bet.
+            // Read the SIZE first. The site's displayed number is then used
+            // to select exactly one number from the opposite range.
             // Examples: BIG-0-8, BIG 3, SMALL9, SMALL OR 7.
             const sizeMatch = predictionText.match(/\b(BIG|SMALL)\b/);
             if (!sizeMatch) {
@@ -1670,10 +1670,13 @@ async function readSitePrediction(targetPeriod) {
 
 function oppositeNumberForSize(size, displayedNumbers) {
     const normalized = String(size || '').toUpperCase();
+    // Opposite-number rule requested by the user:
+    // BIG size -> choose a number from 0..4.
+    // SMALL size -> choose a number from 5..9.
     const allowed = normalized === 'BIG'
-        ? new Set([5, 6, 7, 8, 9])
+        ? new Set([0, 1, 2, 3, 4])
         : normalized === 'SMALL'
-            ? new Set([0, 1, 2, 3, 4])
+            ? new Set([5, 6, 7, 8, 9])
             : null;
     if (!allowed || !Array.isArray(displayedNumbers)) return null;
 
@@ -1693,8 +1696,8 @@ async function decidePrediction(_list, currentPeriod, userId) {
         return { skip: true, reason: result.raw || '13lhack returned SKIP' };
     }
 
-    // Confirm SIZE first, then select only a number actually displayed by the site.
-    // BIG => displayed number in 5..9; SMALL => displayed number in 0..4.
+    // Confirm SIZE first, then select only one number displayed by the site
+    // from the requested opposite range: BIG => 0..4; SMALL => 5..9.
     const oppositeNumber = oppositeNumberForSize(result.side, result.displayedNumbers);
     if (oppositeNumber === null) {
         userStates[userId].lastPrediction = 'SKIP';
