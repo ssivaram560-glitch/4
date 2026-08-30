@@ -586,7 +586,7 @@ const LOSS_STICKER = "CAACAgUAAxkBAAFHUGVp4JX-BE2TRkhIKTwcjkwW-gzdPAACthoAAoG8YV
 const BET_URL     = "https://api.ar-lottery01.com/api/Lottery/WinGoBet";
 const LOGIN_URL   = "https://13llottery.com/api/Home/Login";
 const CAPTCHA_URL = "https://13llottery.com/api/Home/Captcha";
-const DRAW_URL    = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json?pageSize=20";
+const DRAW_URL    = "https://luciferapi.com/";
 const SITE_URL    = "https://rococo-donut-9af061.netlify.app/";
 const CHROME_ARGS = [
     '--no-sandbox', '--disable-setuid-sandbox', '--disable-gpu',
@@ -824,24 +824,43 @@ function sleep(ms) {
 
 async function fetchList() {
     try {
-        // Draw history is the input for the local HTML-equivalent prediction engine and result settlement.
         const response = await axios.get(DRAW_URL, {
             headers: {
                 "Accept": "application/json, text/plain, */*",
-                "Origin": SITE_URL,
-                "Referer": SITE_URL,
                 "User-Agent": "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 Chrome/139.0.0.0 Safari/537.36"
             },
-            timeout: 10000,
+            timeout: 15000,
             validateStatus: status => status >= 200 && status < 300
         });
-        if (!(response.data && response.data.data && Array.isArray(response.data.data.list))) {
-            console.error("[FETCH LIST ERROR] WinGo response was not a list");
+        const payload = response.data;
+        // Lucifer API returns { success, data: [...] } — not { data: { list: [...] } }.
+        const rawList = Array.isArray(payload?.data)
+            ? payload.data
+            : Array.isArray(payload?.data?.list)
+                ? payload.data.list
+                : Array.isArray(payload?.results)
+                    ? payload.results
+                    : Array.isArray(payload)
+                        ? payload
+                        : null;
+        if (!rawList || rawList.length === 0) {
+            console.error("[FETCH LIST ERROR] Lucifer response did not contain a history array");
             return null;
         }
-        return response.data.data.list;
+        const list = rawList.map(item => ({
+            issueNumber: String(item?.issueNumber ?? item?.issue_number ?? item?.period ?? item?.id ?? ""),
+            number: Number.parseInt(item?.number ?? item?.result_number ?? item?.num ?? item?.value ?? -1, 10),
+            size: String(item?.size ?? (Number(item?.number) >= 5 ? "BIG" : "SMALL")).toUpperCase(),
+            color: item?.color ?? null,
+            openTime: item?.openTime ?? null
+        })).filter(item => item.issueNumber && Number.isInteger(item.number) && item.number >= 0 && item.number <= 9);
+        if (list.length === 0) {
+            console.error("[FETCH LIST ERROR] Lucifer history fields were invalid");
+            return null;
+        }
+        return list;
     } catch (error) {
-        console.error("[FETCH LIST ERROR]", error.message);
+        console.error("[FETCH LIST ERROR] Lucifer API:", error.message);
         return null;
     }
 }
