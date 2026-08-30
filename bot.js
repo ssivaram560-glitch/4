@@ -1627,7 +1627,7 @@ async function decidePrediction(list, currentPeriod, userId) {
     const level = Math.max(1, Math.min(3, Number(st.level) || 1));
     const state = { consecutiveLoss: Number(st.consecutiveLoss) || 0, lastPred: userStates[userId].lastPrediction === 'BIG' ? 'B' : 'S', streak: Number(st.consecutiveLoss) || 0 };
     const candidates = [
-        masterAiV10(history, level, state),
+        masterAiV10(history.slice(0, 9).reverse(), level, state),
         part2DeepV3(history),
         part4EnsembleV1(history)
     ];
