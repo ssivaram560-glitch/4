@@ -3182,39 +3182,52 @@ function chooseSixChannel(history, currentHistory) {
     return { signal: selected.signal, reports: candidates.map(item => item.report) };
 }
 
-function calculatePastedModePrediction(list, state) {
+function calculatePastedModePrediction(list, state = {}) {
     if (!Array.isArray(list) || !list[0]) return null;
+
     const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
-    const currentResult = getResultNumber(list[0]);
-    if (!/^\d+$/.test(currentPeriod) || currentResult === null || currentResult === 0) return null;
+    const currentResult = Number.parseInt(list[0].number ?? list[0].winNumber ?? '', 10);
 
-    let nextPeriod;
-    try { nextPeriod = (BigInt(currentPeriod) + 1n).toString(); } catch (_) { return null; }
-    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
-    const answer = nextLast3Num * Math.exp(currentResult);
-    const digits = String(answer).replace('.', '').substring(0, 14);
-    const lastDigit = Number.parseInt(digits.charAt(digits.length - 1), 10);
-    if (!Number.isInteger(lastDigit)) return null;
-
-    if (state.mode === 'RECOVERY') {
-        const color = getActualColorBase(lastDigit);
-        return {
-            type: 'COLOR', val: color, conf: 90, pat: 'COLOUR', mode: 'COLOUR',
-            pattern: `CALC-${lastDigit}`, lastDigit,
-            decisionReason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit} | RECOVERY COLOUR`,
-            bets: [{ type: 'COLOR', val: color, kind: 'color' }]
-        };
+    // Previous result 0 means no prediction for the next period.
+    if (!/^\d+$/.test(currentPeriod) || !Number.isInteger(currentResult) || currentResult === 0) {
+        return null;
     }
 
-    const size = lastDigit >= 5 ? 'BIG' : 'SMALL';
+    let nextPeriod;
+    try {
+        nextPeriod = (BigInt(currentPeriod) + 1n).toString();
+    } catch (_) {
+        return null;
+    }
+
+    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
+    if (!Number.isInteger(nextLast3Num)) return null;
+
+    // Requested formula: NEXT_LAST_3 × exp(CURRENT_RESULT).
+    const answer = nextLast3Num * Math.exp(currentResult);
+    const noDecimal = answer.toString().replace('.', '');
+    const first14 = noDecimal.substring(0, 14);
+    const lastDigit = Number.parseInt(first14.charAt(first14.length - 1), 10);
+    if (!Number.isInteger(lastDigit) || lastDigit < 0 || lastDigit > 9) return null;
+
+    // Always NORMAL BIG/SMALL. Never flip to RECOVERY/opposite mode.
+    const prediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
     return {
-        type: 'SIZE', val: size, conf: 90, pat: 'SIZE', mode: 'SIZE',
-        pattern: `CALC-${lastDigit}`, lastDigit,
-        decisionReason: `${nextLast3Num} × exp(${currentResult}) -> ${lastDigit} | NORMAL SIZE`,
-        bets: [{ type: 'SIZE', val: size, kind: 'size' }]
+        type: 'SIZE',
+        val: prediction,
+        number: lastDigit,
+        conf: 90,
+        historyBased: false,
+        mode: 'NORMAL',
+        pat: 'CALC-NORMAL-BIG-SMALL',
+        pattern: `NEXT3-${nextLast3Num}-CURRENT-${currentResult}`,
+        lastDigit,
+        decisionReason:
+            `${nextLast3Num} × exp(${currentResult}) = ${answer}; ` +
+            `digits=${first14}; last digit=${lastDigit}; ${prediction} | ALWAYS NORMAL`,
+        bets: [{ type: 'SIZE', val: prediction, kind: 'size' }]
     };
 }
-
 function inspectFiveSameRule(history) {
     const rows = Array.isArray(history) ? history.slice(0, 6) : [];
     if (rows.length < 6) return { ready: false, sizeFive: false, colorFive: false, issue: '' };
@@ -3235,141 +3248,27 @@ function inspectFiveSameRule(history) {
 }
 
 async function decidePrediction(list, currentLevel, userId) {
-    if (!Array.isArray(list) || list.length < 1) return null;
+    if (!Array.isArray(list) || !list[0]) return null;
     initState(userId);
-    const cfgMode = String(autobetCfg[userId]?.mode || 'SIZE').toUpperCase();
-    if (cfgMode === 'COMBINED') return { skip: true, reason: 'Combined mode uses its live source predictor' };
+
     const state = userStates[userId];
-    if (!state.channelLosses || typeof state.channelLosses !== 'object') state.channelLosses = { SIZE: 0, COLOR: 0 };
+    // This predictor is intentionally fixed to NORMAL BIG/SMALL.
+    state.mode = 'NORMAL';
+    state.nextPredictionMode = 'SIZE';
+    state.pastedMode = true;
+    state.activeSixChannel = 'SIZE';
 
-    const luciferHistory = await fetchLuciferFullHistory();
-    const analysisHistory = luciferHistory.length >= 6 ? luciferHistory : list;
-    const fiveRule = inspectFiveSameRule(analysisHistory);
-    const sizePattern = fiveRule.sizePattern || '';
-    const colorPattern = fiveRule.colorPattern || '';
-    const sizeSpecial = fiveRule.ready && isSpecialSixPattern(sizePattern);
-    const colorSpecial = fiveRule.ready && isSpecialSixPattern(colorPattern);
-    const bothSpecial = sizeSpecial && colorSpecial;
-    // After a WIN, if the same channel pattern appears again, switch to the
-    // opposite channel before generating the next signal.
-    const winPatternChannel = state.lastWinChannel === 'COLOR' ? 'COLOR' : state.lastWinChannel === 'SIZE' ? 'SIZE' : null;
-    const winPattern = String(state.lastWinPattern || '');
-    const repeatedWinPattern = Boolean(winPatternChannel && winPattern &&
-        ((winPatternChannel === 'SIZE' && sizePattern === winPattern) ||
-         (winPatternChannel === 'COLOR' && colorPattern === winPattern)));
-    if (repeatedWinPattern) {
-        const forcedChannel = winPatternChannel === 'SIZE' ? 'COLOR' : 'SIZE';
-        const issueKey = `${fiveRule.issue}:${winPatternChannel}:${winPattern}`;
-        if (state.lastSamePatternSwitchIssue !== issueKey) {
-            state.activeSixChannel = forcedChannel;
-            state.channelLosses[forcedChannel] = 0;
-            state.lastSamePatternSwitchIssue = issueKey;
-            clearLockedSixPrediction(userId);
-            console.warn(`[REPEAT-WIN-PATTERN] ${userId}: ${winPatternChannel} pattern ${winPattern} repeated; switching to ${forcedChannel}`);
-        }
-    } else if (state.lastSamePatternSwitchIssue && fiveRule.issue !== String(state.lastSamePatternSwitchIssue).split(':')[0]) {
-        state.lastSamePatternSwitchIssue = null;
-    }
-    if (bothSpecial) {
-        if (!state.specialPatternSkipActive) {
-            state.skipPeriodsRemaining = 5;
-            state.specialPatternSkipActive = true;
-            clearLockedSixPrediction(userId);
-            console.warn(`[SPECIAL-PATTERN] ${userId}: SIZE=${sizePattern} COLOR=${colorPattern}; skipping 5 periods`);
-        }
-        if (Number(state.skipPeriodsRemaining) > 0) {
-            state.skipPeriodsRemaining--;
-            return {
-                skip: true,
-                reason: `Special pattern in both SIZE and COLOR (${sizePattern}/${colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
-                pattern: sizePattern,
-                colorPattern,
-                specialPatternSkip: true
-            };
-        }
-    } else {
-        state.specialPatternSkipActive = false;
-    }
-    if (sizeSpecial !== colorSpecial) {
-        const forcedChannel = sizeSpecial ? 'COLOR' : 'SIZE';
-        if (state.activeSixChannel !== forcedChannel) {
-            state.activeSixChannel = forcedChannel;
-            state.channelLosses[forcedChannel] = 0;
-            clearLockedSixPrediction(userId);
-            console.warn(`[SPECIAL-PATTERN] ${userId}: ${sizeSpecial ? sizePattern : colorPattern}; switching to ${forcedChannel}`);
-        }
-    }
-    if (fiveRule.ready) {
-        const bothFive = fiveRule.sizeFive && fiveRule.colorFive;
-        if (bothFive) {
-            // One five-period pause per continuous both-five event.
-            if (!state.fiveSameSkipActive) {
-                state.skipPeriodsRemaining = 5;
-                state.fiveSameSkipActive = true;
-                state.lastFiveSameIssue = fiveRule.issue;
-                clearLockedSixPrediction(userId);
-                console.warn(`[FIVE-SAME] ${userId}: SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}; skipping 5 periods`);
-            }
-            if (Number(state.skipPeriodsRemaining) > 0) {
-                state.skipPeriodsRemaining--;
-                return {
-                    skip: true,
-                    reason: `SIZE and COLOR both have 5 same in latest 6 (${fiveRule.sizePattern}/${fiveRule.colorPattern}); ${state.skipPeriodsRemaining} skip period(s) remaining`,
-                    pattern: fiveRule.sizePattern,
-                    colorPattern: fiveRule.colorPattern,
-                    fiveSameSkip: true
-                };
-            }
-        } else {
-            // Re-arm only after the both-five condition has cleared.
-            state.fiveSameSkipActive = false;
-            state.skipPeriodsRemaining = 0;
-            if (fiveRule.sizeFive || fiveRule.colorFive) {
-            const forcedChannel = fiveRule.sizeFive ? 'COLOR' : 'SIZE';
-            const lockedChannel = state.sixPredictionLock?.channel || null;
-            if (state.activeSixChannel !== forcedChannel || lockedChannel !== forcedChannel) {
-                state.activeSixChannel = forcedChannel;
-                state.channelLosses[forcedChannel] = 0;
-                clearLockedSixPrediction(userId);
-                console.warn(`[FIVE-SAME] ${userId}: switching to ${forcedChannel}; SIZE=${fiveRule.sizePattern} COLOR=${fiveRule.colorPattern}`);
-            }
-        }
-        }
-    }
+    const signal = calculatePastedModePrediction(list, state);
+    if (!signal) return null;
 
-    const locked = getLockedSixPrediction(userId);
-    if (locked) {
-        return {
-            type: locked.type, val: locked.val, conf: 50, historyBased: true,
-            channel: locked.channel, pat: locked.rule || 'LOCKED-UNTIL-WIN',
-            mode: `${locked.channel || locked.type} LOCKED UNTIL WIN`,
-            pattern: locked.pattern, colorPattern: locked.colorPattern,
-            decisionReason: `Locked ${locked.channel || locked.type} prediction; repeat ${locked.val} until WIN (losses=${locked.losses || 0})`,
-            bets: [{ type: locked.type, val: locked.val, kind: locked.type === 'COLOR' ? 'color' : 'size' }]
-        };
-    }
-
-    let channel = state.activeSixChannel === 'COLOR' ? 'COLOR' : state.activeSixChannel === 'SIZE' ? 'SIZE' : null;
-    let signal;
-
-    if (channel) {
-        signal = buildSixChannelSignal(analysisHistory, channel);
-        if (signal.skip) return signal;
-    } else {
-        const selected = chooseSixChannel(analysisHistory, analysisHistory);
-        signal = selected.signal;
-        if (signal.skip) return signal;
-        channel = signal.channel;
-        state.activeSixChannel = channel;
-    }
-
-    signal.channelLosses = Number(state.channelLosses[channel] || 0);
-    signal.decisionReason += ` | ${channel} loss streak ${signal.channelLosses}/5`;
-    const sourceIssue = analysisHistory[0]?.issueNumber || list[0]?.issueNumber;
-    setLockedSixPrediction(userId, signal, sourceIssue);
+    // Keep the returned signal consistent even if an old user state contains
+    // stale RECOVERY/channel values from a previous version of the bot.
+    signal.type = 'SIZE';
+    signal.mode = 'NORMAL';
+    signal.pat = 'CALC-NORMAL-BIG-SMALL';
+    signal.bets = [{ type: 'SIZE', val: signal.val, kind: 'size' }];
     return signal;
 }
-
 function recordLossStreakHit(userId) {
     const st = autobetState[userId];
     const cfg = autobetCfg[userId] || {};
@@ -3677,8 +3576,8 @@ async function runPredict(userId, chatId) {
 
     // Mode is chosen by this period's strongest history signal, not by the
     // previous period's WIN or LOSS.
-    state.mode = signal.type === 'COLOR' ? 'RECOVERY' : 'NORMAL';
-    state.nextPredictionMode = signal.type === 'COLOR' ? 'COLOUR' : 'SIZE';
+    state.mode = 'NORMAL';
+    state.nextPredictionMode = 'SIZE';
 
     let abLine = signal.fallback
         ? "🤖 AutoBet: OFF (RANDOM FALLBACK)"
@@ -3715,14 +3614,14 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : Six-result opposite pattern\n"+
+"║ 🎮 Mode  : Formula NORMAL BIG/SMALL\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
 "║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"% | Hist "+String(signal.historicalWinRate ?? "-")+"%\n"+
 "║ "+(signal.type === "COLOR" ? "Color   : " : "Size    : ")+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-"║ Source  : Netlify size + Lucifer history\n"+
+"║ Source  : NEXT_LAST_3 × exp(CURRENT_RESULT)\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
