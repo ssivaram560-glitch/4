@@ -1816,7 +1816,11 @@ function initUser(id) {
         nextStartTime: null,
         levelHistory: {},
         sizeLevelHistory: {},
-        numberLevelHistory: {}
+        numberLevelHistory: {},
+        // One live-bet loss puts the engine into watch mode.
+        // The next live bet is allowed only after a watch prediction wins.
+        waitingForWatchWin: false,
+        lastOutcome: null
     };
     if (!autobetState[id].levelHistory || typeof autobetState[id].levelHistory !== "object") autobetState[id].levelHistory = {};
     if (!Number.isInteger(autobetState[id].sizeLevel) || autobetState[id].sizeLevel < 1) autobetState[id].sizeLevel = autobetState[id].level || 1;
@@ -2507,6 +2511,8 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
         st.inMart = false;
         st.consecutiveLoss = 0;
         st.lossStreakHitRecorded = false;
+        st.waitingForWatchWin = false;
+        st.lastOutcome = "WIN";
     } else {
         st.consecutiveLoss++;
         recordLossStreakHit(userId);
@@ -2517,6 +2523,9 @@ function updateCombinedAfterResult(userId, sizeWon, numberWon, betPlaced) {
         st.numberLevel = currentNumberLevel >= maxLevel ? 1 : currentNumberLevel + 1;
         st.level = Math.max(st.sizeLevel, st.numberLevel);
         st.inMart = st.level > 1;
+        // Do not place another live bet immediately after this loss.
+        st.waitingForWatchWin = true;
+        st.lastOutcome = "LOSS";
     }
 }
 
@@ -3415,22 +3424,39 @@ function updateAfterResult(userId, wasWin, actual, betPlaced) {
     state.lossStreak = wasWin ? 0 : (Number(state.lossStreak) || 0) + 1;
     console.log(`[RESULT] ${wasWin ? 'WIN' : 'LOSS'} recorded; next mode will be selected from current-period history`);
 
-    // A win resets the martingale level for both SIZE and COLOUR, including
-    // WATCH settlements where no live stake was placed.
+    // Betting state machine:
+    //   1) First eligible period places a live bet.
+    //   2) Live WIN: reset to L1 and bet the very next period.
+    //   3) Live LOSS: advance exactly one level, then WATCH only.
+    //   4) WATCH LOSS: keep watching; never advance the level.
+    //   5) WATCH WIN: unlock betting; the next period places the stored level.
     const st = autobetState[userId];
-    if (wasWin && st) {
-        st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
-        st.inMart = false; st.consecutiveLoss = 0;
-        st.lossStreakHitRecorded = false;
-    } else if (!wasWin && st && betPlaced) {
-        st.consecutiveLoss++;
-        const cfg = autobetCfg[userId] || {};
-        const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
-        const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
-        st.level = level >= maxLevel ? 1 : level + 1;
-        st.sizeLevel = st.level; st.numberLevel = st.level;
-        st.inMart = st.level > 1;
-        recordLossStreakHit(userId);
+    const cfg = autobetCfg[userId] || {};
+    if (st && cfg.enabled) {
+        if (betPlaced) {
+            if (wasWin) {
+                st.level = 1; st.sizeLevel = 1; st.numberLevel = 1;
+                st.inMart = false; st.consecutiveLoss = 0;
+                st.lossStreakHitRecorded = false;
+                st.waitingForWatchWin = false;
+                st.lastOutcome = "WIN";
+            } else {
+                st.consecutiveLoss++;
+                const maxLevel = Math.max(1, Number(cfg.maxLvl) || 1);
+                const level = Math.min(maxLevel, Math.max(1, Number(st.level) || 1));
+                st.level = level >= maxLevel ? 1 : level + 1;
+                st.sizeLevel = st.level; st.numberLevel = st.level;
+                st.inMart = st.level > 1;
+                st.waitingForWatchWin = true;
+                st.lastOutcome = "LOSS";
+                recordLossStreakHit(userId);
+            }
+        } else if (st.waitingForWatchWin) {
+            // A watch result never changes the martingale level. It only
+            // decides whether the following period may place a live bet.
+            st.waitingForWatchWin = !wasWin;
+            st.lastOutcome = wasWin ? "WATCH_WIN" : "WATCH_LOSS";
+        }
     }
 }
 
@@ -3665,10 +3691,17 @@ async function runPredict(userId, chatId) {
             : "🤖 AutoBet: OFF";
         canBet = false;
     } else if (!signal.fallback) {
-        canBet = true;
-        const sequence = cfg.mode === "NUMBER" ? cfg.customNumberBets : cfg.customBets;
-        const curBet = sequence[st.level - 1] ?? (cfg.baseBet * (MULT[st.level - 1] || 1));
-        abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
+        // After every live-bet loss, prediction continues but staking pauses.
+        // A watch WIN unlocks the next period; watch losses keep the pause.
+        if (st.waitingForWatchWin) {
+            canBet = false;
+            abLine = "👀 WATCH MODE: waiting for WIN → next bet L" + st.level;
+        } else {
+            canBet = true;
+            const sequence = cfg.mode === "NUMBER" ? cfg.customNumberBets : cfg.customBets;
+            const curBet = sequence[st.level - 1] ?? (cfg.baseBet * (MULT[st.level - 1] || 1));
+            abLine = (st.level > 1 ? "📈 MART " : "💰 BET ") + "L" + st.level + ": ₹" + curBet;
+        }
     } else {
         canBet = false;
     }
@@ -3913,7 +3946,10 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             while (keys.length > MAX_LEVEL_HISTORY) delete st.levelHistory[keys.shift()];
         }
 
-        if (combinedResult) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
+        // Combined settlement updates its two live legs only when a real pair
+        // was placed. A watch result must go through the common watch state
+        // machine so a watch WIN unlocks the next period.
+        if (combinedResult && betPlaced) updateCombinedAfterResult(userId, sizeMatched, numberMatched, betPlaced);
         else updateAfterResult(userId, win, actualSize, betPlaced);
 
         const s = stats[userId];
@@ -4078,6 +4114,7 @@ async function autobetStatus(chatId, userId) {
     (cfg.mode === "COMBINED" ? "Size Bets: ₹"+cfg.customSizeBets.join(" → ₹")+"\nNum Bets : ₹"+cfg.customNumberBets.join(" → ₹")+"\nRule     : 1 site size + 1 site number\n" : "Bet Seq  : ₹"+cfg.customBets.join(" → ₹")+"\n")+
 "Watch    : "+(cfg.watch?"ON":"OFF")+"\n"+
 "WatchLoss: "+st.consecutiveLoss+"/"+cfg.watchLoss+"\n"+
+"Bet Flow : "+(st.waitingForWatchWin ? "WATCH — next WIN unlocks L"+st.level : "BET NEXT PERIOD")+"\n"+
 "Base Bet : ₹"+cfg.baseBet+"\n"+
 "Max Level: "+cfg.maxLvl+"\n"+
 "Target Profit: ₹"+cfg.targetProfit+"\n"+
@@ -4722,7 +4759,7 @@ if(text==="🔢 Set Watch Losses"){
             running[id]=true;sentPeriods[id]=new Set();
             predictionDispatches.set(String(id), new Set());
             settledPeriods.delete(String(id));
-            autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null};
+            autobetState[id]={...(autobetState[id]||{}),level:1,sizeLevel:1,numberLevel:1,consecutiveLoss:0,inMart:false,lastWinLevel:null,lastWinMode:null,waitingForWatchWin:false,lastOutcome:null};
 
             // Load previous B/S history from API
             const prevList = await fetchList();
