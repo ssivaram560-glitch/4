@@ -659,6 +659,8 @@ const LUCIFER_OLD_ANALYSIS_URL = "https://luciferapi.com/30sec.php";
 const COMBINED_PAGE_URL = "https://endearing-bavarois-067272.netlify.app/";
 // BigSmall+Number uses the requested one-minute draw source.
 const COMBINED_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
+// Authoritative 1-minute source used by uploaded 3.html.
+const WHIMSICAL_SOURCE_URL = "https://draw.ar-lottery01.com/WinGo/WinGo_1M/GetHistoryIssuePage.json";
 // Lucifer root returns the complete historical dataset used for shared number ranking.
 const LUCIFER_FULL_HISTORY_URL = "https://luciferapi.com/";
 const SITE_URL    = "https://www.ts777.co";
@@ -1039,6 +1041,35 @@ async function fetchCombinedSourceList() {
         })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
     } catch (error) {
         console.error('[COMBINED SOURCE ERROR]', error?.message || error);
+        return null;
+    }
+}
+
+// Fetch only the bounded 100 rows required by 3.html. This is the sole
+// source for BIG/SMALL mode, including both the target period and settlement.
+async function fetchWhimsicalHistory() {
+    try {
+        const response = await axios.get(WHIMSICAL_SOURCE_URL + '?pageSize=100&t=' + Date.now(), {
+            headers: {
+                'Accept': 'application/json',
+                'Cache-Control': 'no-cache, no-store, max-age=0',
+                'Pragma': 'no-cache',
+                'Origin': 'https://whimsical-buttercream-00c705.netlify.app',
+                'Referer': 'https://whimsical-buttercream-00c705.netlify.app/',
+                'User-Agent': 'Mozilla/5.0'
+            },
+            timeout: 10000,
+            maxContentLength: 512 * 1024,
+            maxBodyLength: 512 * 1024,
+            validateStatus: status => status >= 200 && status < 300
+        });
+        const raw = Array.isArray(response.data?.data?.list) ? response.data.data.list : [];
+        return raw.slice(0, 100).map(item => ({
+            issueNumber: String(item?.issueNumber ?? item?.issue ?? ''),
+            number: String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1)
+        })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
+    } catch (error) {
+        console.error('[WHIMSICAL SOURCE ERROR]', error?.message || error);
         return null;
     }
 }
@@ -1695,8 +1726,8 @@ function generateRandomBigSmallFallback(period) {
 async function fetchListForUser(userId) {
     const mode = String(autobetCfg[userId]?.mode || '').toUpperCase();
     if (mode === 'COMBINED') return await fetchCombinedSourceList();
-    // Big/Small uses the Lucifer 30-second history directly.
-    return await fetchList();
+    // BIG/SMALL mode follows the uploaded 3.html source exactly.
+    return await fetchWhimsicalHistory();
 }
 
 // Helper parser function
@@ -3182,50 +3213,117 @@ function chooseSixChannel(history, currentHistory) {
     return { signal: selected.signal, reports: candidates.map(item => item.report) };
 }
 
+// Exact predictor ported from uploaded 3.html.
+const WHIMSICAL_MAP = Object.freeze({
+    STREAK: 'SBS', BALANCE: 'SBB', ALTERNATION: 'BBB',
+    TRANSITION: 'BSS', REPEAT: 'SBS', GAP: 'BSB', WEIGHTED: 'SBB'
+});
+const WHIMSICAL_MODES = Object.freeze(['STREAK', 'BALANCE', 'ALTERNATION', 'TRANSITION', 'REPEAT', 'GAP', 'WEIGHTED']);
+
+function whimsicalSize(n) {
+    return Number(n) >= 5 ? 'BIG' : 'SMALL';
+}
+function whimsicalTransition(nums) {
+    const counts = Array(10).fill(0);
+    const current = nums[0];
+    for (let i = 0; i < nums.length - 1; i++) if (nums[i] === current) counts[nums[i + 1]]++;
+    const total = counts.reduce((a, b) => a + b, 0);
+    return total ? (counts.slice(5).reduce((a, b) => a + b, 0) / total >= 0.5 ? 'BIG' : 'SMALL') : whimsicalSize(current);
+}
+function whimsicalGap(nums) {
+    const gaps = [];
+    for (let n = 0; n < 10; n++) {
+        const index = nums.indexOf(n);
+        gaps.push([index < 0 ? nums.length : index, n]);
+    }
+    const maxGap = Math.max(...gaps.map(item => item[0]));
+    const candidates = gaps.filter(item => item[0] >= maxGap * 0.75).sort((a, b) => b[0] - a[0]);
+    return whimsicalSize(candidates[0]?.[1] ?? nums[0]);
+}
+function whimsicalWeighted(nums) {
+    const sizes = nums.map(whimsicalSize);
+    let streak = 1;
+    for (let i = 1; i < Math.min(8, sizes.length); i++) {
+        if (sizes[i] === sizes[0]) streak++;
+        else break;
+    }
+    const bigCount = sizes.slice(0, 10).filter(x => x === 'BIG').length;
+    const smallCount = 10 - bigCount;
+    const alternation = sizes.length < 2 ? 0 : sizes.slice(0, 12).reduce((v, x, i, a) => i && x !== a[i - 1] ? v + 1 : v, 0) / (Math.min(12, sizes.length) - 1 || 1);
+    let big = 0.5, small = 0.5;
+    const add = (side, amount) => { if (side === 'BIG') big += amount; else small += amount; };
+    const sub = (side, amount) => { if (side === 'BIG') big -= amount; else small -= amount; };
+    if (streak >= 4) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .32); sub(sizes[0], .32); }
+    else if (streak >= 3) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .22); sub(sizes[0], .22); }
+    else if (streak >= 2) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .1); sub(sizes[0], .1); }
+    if (bigCount >= 8) { add('SMALL', .26); sub('BIG', .26); }
+    else if (bigCount >= 7) { add('SMALL', .18); sub('BIG', .18); }
+    else if (bigCount >= 6) { add('SMALL', .08); sub('BIG', .08); }
+    if (smallCount >= 8) { add('BIG', .26); sub('SMALL', .26); }
+    else if (smallCount >= 7) { add('BIG', .18); sub('SMALL', .18); }
+    else if (smallCount >= 6) { add('BIG', .08); sub('SMALL', .08); }
+    if (alternation > .72) { const side = sizes[0] === 'BIG' ? 'SMALL' : 'BIG'; add(side, .2); sub(sizes[0], .2); }
+    else if (alternation < .28) { add(sizes[0], .12); sub(sizes[0] === 'BIG' ? 'SMALL' : 'BIG', .12); }
+    return big >= small ? 'BIG' : 'SMALL';
+}
+function whimsicalContext(nums) {
+    const sizes = nums.map(whimsicalSize);
+    let streak = 1;
+    for (let i = 1; i < Math.min(8, sizes.length); i++) { if (sizes[i] === sizes[0]) streak++; else break; }
+    const bigCount = sizes.slice(0, 10).filter(x => x === 'BIG').length;
+    const alternation = sizes.length < 2 ? 0 : sizes.slice(0, 12).reduce((v, x, i, a) => i && x !== a[i - 1] ? v + 1 : v, 0) / (Math.min(12, sizes.length) - 1 || 1);
+    const out = {};
+    out.STREAK = streak >= 2 ? (sizes[0] === 'BIG' ? 'SMALL' : 'BIG') : sizes[0];
+    out.BALANCE = Math.abs(bigCount - (10 - bigCount)) >= 2 ? (bigCount > 10 - bigCount ? 'SMALL' : 'BIG') : sizes[0];
+    out.ALTERNATION = alternation > .72 ? (sizes[0] === 'BIG' ? 'SMALL' : 'BIG') : alternation < .28 ? sizes[0] : (bigCount >= 10 - bigCount ? 'BIG' : 'SMALL');
+    out.TRANSITION = whimsicalTransition(nums);
+    const key = nums.slice(0, 3).join(',');
+    let found = null;
+    for (let i = 3; i < nums.length - 3; i++) if (nums.slice(i, i + 3).join(',') === key) { found = nums[i - 1]; break; }
+    out.REPEAT = found === null ? sizes[0] : whimsicalSize(found);
+    out.GAP = whimsicalGap(nums);
+    out.WEIGHTED = whimsicalWeighted(nums);
+    return out;
+}
 function calculatePastedModePrediction(list, state = {}) {
     if (!Array.isArray(list) || !list[0]) return null;
-
-    const currentPeriod = String(list[0].issueNumber ?? list[0].issue ?? '');
-    const currentResult = Number.parseInt(list[0].number ?? list[0].winNumber ?? '', 10);
-
-    // Previous result 0 means no prediction for the next period.
-    if (!/^\d+$/.test(currentPeriod) || !Number.isInteger(currentResult) || currentResult === 0) {
-        return null;
+    const nums = list.slice(0, 100).map(item => Number(item?.number)).filter(n => Number.isInteger(n) && n >= 0 && n <= 9);
+    if (!nums.length) return null;
+    const period = String(list[0].issueNumber ?? list[0].issue ?? '');
+    if (!/^\d+$/.test(period)) return null;
+    const nextPeriod = (() => { try { return (BigInt(period) + 1n).toString(); } catch (_) { return null; } })();
+    if (!nextPeriod) return null;
+    const context = whimsicalContext(nums);
+    const pattern = nums.slice(0, 3).map(whimsicalSize).map(x => x[0]).join('');
+    const active = WHIMSICAL_MODES.filter(mode => WHIMSICAL_MAP[mode] === pattern);
+    const votes = active.map(mode => context[mode]);
+    const bigVotes = votes.filter(value => value === 'BIG').length;
+    const smallVotes = votes.length - bigVotes;
+    if (!active.length || bigVotes === smallVotes) {
+        return {
+            skip: true,
+            source: 'WHIMSICAL_HTML',
+            period: nextPeriod,
+            reason: active.length ? `WAIT: tie ${bigVotes}-${smallVotes} for pattern ${pattern}` : `WAIT: no best-pattern mode match for ${pattern}`
+        };
     }
-
-    let nextPeriod;
-    try {
-        nextPeriod = (BigInt(currentPeriod) + 1n).toString();
-    } catch (_) {
-        return null;
-    }
-
-    const nextLast3Num = Number.parseInt(nextPeriod.slice(-3), 10);
-    if (!Number.isInteger(nextLast3Num)) return null;
-
-    // Requested formula: NEXT_LAST_3 × exp(CURRENT_RESULT).
-    const answer = nextLast3Num * Math.exp(currentResult);
-    const noDecimal = answer.toString().replace('.', '');
-    const first14 = noDecimal.substring(0, 14);
-    const lastDigit = Number.parseInt(first14.charAt(first14.length - 1), 10);
-    if (!Number.isInteger(lastDigit) || lastDigit < 0 || lastDigit > 9) return null;
-
-    // Always NORMAL BIG/SMALL. Never flip to RECOVERY/opposite mode.
-    const prediction = lastDigit <= 4 ? 'SMALL' : 'BIG';
+    const pick = bigVotes > smallVotes ? 'BIG' : 'SMALL';
     return {
+        skip: false,
+        source: 'WHIMSICAL_HTML',
+        externalPatternSignal: true,
         type: 'SIZE',
-        val: prediction,
-        number: lastDigit,
-        conf: 90,
-        historyBased: false,
-        mode: 'NORMAL',
-        pat: 'CALC-NORMAL-BIG-SMALL',
-        pattern: `NEXT3-${nextLast3Num}-CURRENT-${currentResult}`,
-        lastDigit,
-        decisionReason:
-            `${nextLast3Num} × exp(${currentResult}) = ${answer}; ` +
-            `digits=${first14}; last digit=${lastDigit}; ${prediction} | ALWAYS NORMAL`,
-        bets: [{ type: 'SIZE', val: prediction, kind: 'size' }]
+        val: pick,
+        mode: 'BIG/SMALL',
+        pat: 'FULL-HISTORY-BEST-PATTERNS',
+        pattern,
+        period: nextPeriod,
+        activeModes: active,
+        bigVotes,
+        smallVotes,
+        conf: Math.round(Math.max(bigVotes, smallVotes) / active.length * 100),
+        decisionReason: `${active.length} mode(s) matched ${pattern}; BIG ${bigVotes}, SMALL ${smallVotes}`,
+        bets: [{ type: 'SIZE', val: pick, kind: 'size' }]
     };
 }
 function inspectFiveSameRule(history) {
@@ -3250,22 +3348,15 @@ function inspectFiveSameRule(history) {
 async function decidePrediction(list, currentLevel, userId) {
     if (!Array.isArray(list) || !list[0]) return null;
     initState(userId);
-
     const state = userStates[userId];
-    // This predictor is intentionally fixed to NORMAL BIG/SMALL.
     state.mode = 'NORMAL';
     state.nextPredictionMode = 'SIZE';
     state.pastedMode = true;
     state.activeSixChannel = 'SIZE';
-
     const signal = calculatePastedModePrediction(list, state);
     if (!signal) return null;
-
-    // Keep the returned signal consistent even if an old user state contains
-    // stale RECOVERY/channel values from a previous version of the bot.
+    if (signal.skip) return signal;
     signal.type = 'SIZE';
-    signal.mode = 'NORMAL';
-    signal.pat = 'CALC-NORMAL-BIG-SMALL';
     signal.bets = [{ type: 'SIZE', val: signal.val, kind: 'size' }];
     return signal;
 }
@@ -3506,7 +3597,7 @@ async function runPredict(userId, chatId) {
         return;
     }
 
-    // The latest draw result is the only input to the fixed local mapping.
+    // The uploaded HTML's API is authoritative for both current history and next period.
     const next = getNextIssue(list);
     if (!next) {
         await send(chatId, "SKIP");
@@ -3522,6 +3613,9 @@ async function runPredict(userId, chatId) {
     }
     sentPeriods[userId].add(next);
     dispatched.add(String(next));
+    while (dispatched.size > MAX_SENT_PERIODS) {
+        dispatched.delete(dispatched.values().next().value);
+    }
     predictionDispatches.set(runKey, dispatched);
     while (sentPeriods[userId].size > MAX_SENT_PERIODS) {
         sentPeriods[userId].delete(sentPeriods[userId].values().next().value);
@@ -3561,7 +3655,7 @@ async function runPredict(userId, chatId) {
     const signalConfidence = Number(signal.conf ?? 90);
     const minimumConfidence = 90;
     const isSixPatternSignal = signal.historyBased === true;
-    if (!signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
+    if (!signal.externalPatternSignal && !signal.fallback && !isSixPatternSignal && (!Number.isFinite(signalConfidence) || signalConfidence < minimumConfidence)) {
         const reason = `Confidence ${Number.isFinite(signalConfidence) ? signalConfidence : 0}% < required ${minimumConfidence}%`;
         console.log(`[PREDICTION] Skipping period ${next}: ${reason}`);
         await send(chatId,
@@ -3614,14 +3708,14 @@ async function runPredict(userId, chatId) {
 "╠══════════════════════════╣\n"+
 "║ Period  : "+next.slice(-6)+"\n"+
 "║ Game    : SIZE/COLOR\n"+
-"║ 🎮 Mode  : Formula NORMAL BIG/SMALL\n"+
+"║ 🎮 Mode  : FULL-HISTORY BEST PATTERNS\n"+
 "║ Mode    : "+String(signal.mode || signal.pat || "PATTERN-5/4")+"\n"+
 "║ Pattern : "+String(signal.pattern || "LAST-5/LAST-4")+"\n"+
 "║ Number  : "+String(signal.number ?? "-")+"\n"+
 "║ Conf.   : "+String(signal.conf ?? signal.numberConfidence ?? "-")+"% | Hist "+String(signal.historicalWinRate ?? "-")+"%\n"+
 "║ "+(signal.type === "COLOR" ? "Color   : " : "Size    : ")+signal.val+"\n"+
 "║ Result  : "+formatPrediction(signal)+"\n"+
-"║ Source  : NEXT_LAST_3 × exp(CURRENT_RESULT)\n"+
+"║ Source  : uploaded 3.html / WinGo_1M\n"+
 "╠══════════════════════════╣\n"+
 "║ "+abLine+"\n"+
 waitLine+"\n"+
@@ -3747,6 +3841,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         const settled = settledPeriods.get(timerKey) || new Set();
         if (settled.has(String(target))) return;
         settled.add(String(target));
+        while (settled.size > MAX_SENT_PERIODS) settled.delete(settled.values().next().value);
         settledPeriods.set(timerKey, settled);
 
         const actualSize = num >= 5 ? "BIG" : "SMALL";
