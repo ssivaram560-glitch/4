@@ -2211,7 +2211,9 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
                 amount:      1,
                 betContent:  bc,
                 betMultiple: betMult,
-                gameCode:    cfg.mode === "COMBINED" ? "WinGo_1M" : "WinGo_30S",
+                // BIG/SMALL now follows the uploaded 1-minute source.
+                // Keep NUMBER-only mode on the legacy 30-second game.
+                gameCode:    cfg.mode === "NUMBER" ? "WinGo_30S" : "WinGo_1M",
                 issueNumber: String(period),
                 language:    "en",
                 random:      Math.floor(Math.random() * 1e12)
@@ -2242,7 +2244,7 @@ async function placeBet(userId, chatId, period, prediction, predType, level, amo
             });
             const d = r.data || {};
             const apiMessage = String(d.msg ?? d.message ?? d.msgCode ?? "");
-            console.log(`[BET RESP] code:${d.code} msg:${apiMessage}`);
+            console.log(`[BET RESP] game=${params.gameCode} period=${params.issueNumber} code:${d.code} msg:${apiMessage}`);
 
             // A bet response may rotate the token. Accept it only after bet success.
             // If no valid token is returned, keep the current token unchanged.
