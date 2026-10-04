@@ -639,7 +639,7 @@ async function captchaLogin(userId, chatId, phone, password, bot, logBoth) {
 //  CONFIG
 // ============================================================
 // Keep secrets outside the source code.
-const BOT_TOKEN    = process.env.BOT_TOKEN || "8868741436:AAHtR52bwP-C7o-gJSpoz8y9IH4y6F-Xui8";
+const BOT_TOKEN    = process.env.BOT_TOKEN || "8868741436:AAFBgXlawL4iSWwEJQx6r0bqQPgiPWe9wJE";
 const OWNER_ID     = 8869874751;
 const OWNER_PASS   = process.env.OWNER_PASS || "2004";
 const ADMIN_HANDLE = "@Sivakutty1";
@@ -1069,7 +1069,7 @@ async function fetchWhimsicalHistory() {
             number: String(item?.number ?? item?.winNumber ?? '').replace(/\D/g, '').slice(-1)
         })).filter(item => /^\d+$/.test(item.issueNumber) && /^[0-9]$/.test(item.number));
     } catch (error) {
-        console.error('[WHIMSICAL SOURCE ERROR]', error?.message || error);
+        console.error('[WHIMSICAL SOURCE ERROR] retryable:', error?.message || error);
         return null;
     }
 }
@@ -3577,6 +3577,15 @@ async function runPredict(userId, chatId) {
     const st = autobetState[userId];
     const cfg = autobetCfg[userId];
 
+    // The result checker owns the current target period. Keep a short
+    // heartbeat alive, but never start a second prediction while settlement
+    // is still polling. This prevents the one-prediction-then-stop race.
+    if (resultCheckInFlight.has(runKey)) {
+        scheduleRun(userId, chatId, 5000);
+        runInFlight.delete(runKey);
+        return;
+    }
+
     if (st.isWaiting) {
         if (Date.now() >= st.nextStartTime) {
             st.isWaiting = false;
@@ -3767,6 +3776,10 @@ waitLine+"\n"+
             ? rawPredictedBets.filter(spec => spec.type === "NUMBER")
             : rawPredictedBets.filter(spec => spec.type === "SIZE" || spec.type === "COLOR");
     checkResult(userId, chatId, next, signal.val, signal.type, placedBets, predictedBets);
+    // Heartbeat fallback: checkResult normally schedules after settlement;
+    // this timer guarantees recovery if a network/API edge case leaves it
+    // waiting. The guard above prevents overlapping bets.
+    scheduleRun(userId, chatId, 7000);
     runInFlight.delete(runKey);
 }
 
@@ -3839,7 +3852,10 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
         // The result endpoint can be read more than once while timers overlap.
         // Mark this period before sending any notification.
         const settled = settledPeriods.get(timerKey) || new Set();
-        if (settled.has(String(target))) return;
+        if (settled.has(String(target))) {
+            scheduleRun(userId, chatId, 5000);
+            return;
+        }
         settled.add(String(target));
         while (settled.size > MAX_SENT_PERIODS) settled.delete(settled.values().next().value);
         settledPeriods.set(timerKey, settled);
@@ -4008,7 +4024,7 @@ async function checkResult(userId, chatId, target, predicted, predType, placedBe
             callbackBusy = false;
         }
     };
-    iv = setTimeout(tick, 10000);
+    iv = setTimeout(tick, 7000);
     resultCheckTimers.set(timerKey, iv);
 }
 
